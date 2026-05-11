@@ -1,40 +1,76 @@
-from flask import Flask, request, jsonify, send_from_directory
-from user_agents import parse
-from waitress import serve
-import os, json, time, hashlib, hmac
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from ua_parser import user_agent_parser
+import os
 
 app = Flask(__name__)
+CORS(app)
 
-KEY_FILE = "keys.json"
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "change_me")
-LEMON_WEBHOOK_SECRET = os.environ.get("LEMON_WEBHOOK_SECRET", "change_me_too")
+# API Keys: email -> credits remaining. Add keys manually after purchase.
+KEYS = {
+    "FREE": 1000,
+    # Add paid keys here: "sk_live_abc123": 10000
+}
 
-def load_keys():
-    try:
-        with open(KEY_FILE, 'r') as f: return json.load(f)
-    except: return {"test_123": 1000} # 1000/day free now
-
-def save_keys(keys):
-    with open(KEY_FILE, 'w') as f: json.dump(keys, f)
-        
-@app.route('/health', methods=['GET'])
-def health_check():
-    """
-    Health check endpoint for monitoring + Render.
-    No auth required. Returns 200 if server alive.
-    """
+@app.route('/')
+def home():
     return jsonify({
-        "status": "healthy",
-        "service": "ua-parser-api",
-        "version": "1.0.0",
-        "timestamp": int(time.time()),
-        "uptime_target": "99.9%"
-    }), 200
-KEYS = load_keys()
+        "service": "UA Parser API",
+        "docs": "https://ua-parser-api-zsql.onrender.com/docs",
+        "free_test": "https://ua-parser-api-zsql.onrender.com/v1/parse?key=FREE&ua=Mozilla/5.0",
+        "buy_pro": "https://uaparserapi.lemonsqueezy.com/checkout/buy/a7f42d10-e3e2-41e9-ad5f-f893a48f0679"
+    })
 
-@app.after_request
-def add_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy", "latency_ms": "<80"})
+
+@app.route('/v1/parse')
+def parse():
+    key = request.args.get('key', '')
+    ua_string = request.args.get('ua', '')
+
+    if key not in KEYS or KEYS[key] <= 0:
+        return jsonify({
+            "error": "Rate limit exceeded or invalid key",
+            "price": "ZMW 100/month = 10,000 requests. Free tier available",
+            "buy": "https://uaparserapi.lemonsqueezy.com/checkout/buy/a7f42d10-e3e2-41e9-ad5f-f893a48f0679",
+            "free_tier": "Email mulengwa6@gmail.com with subject 'FREE KEY' for 1000 requests/month",
+            "docs": "https://ua-parser-api-zsql.onrender.com/docs"
+        }), 402
+
+    if not ua_string:
+        return jsonify({"error": "Missing?ua=Mozilla/5.0... parameter"}), 400
+
+    # Deduct credit for non-FREE keys
+    if key!= "FREE":
+        KEYS[key] -= 1
+
+    parsed = user_agent_parser.Parse(ua_string)
+
+    return jsonify({
+        "user_agent": ua_string,
+        "browser": {
+            "family": parsed['user_agent']['family'],
+            "major": parsed['user_agent']['major'],
+            "minor": parsed['user_agent']['minor']
+        },
+        "os": {
+            "family": parsed['os']['family'],
+            "major": parsed['os']['major'],
+            "minor": parsed['os']['minor']
+        },
+        "device": {
+            "family": parsed['device']['family'],
+            "brand": parsed['device']['brand'],
+            "model": parsed['device']['model']
+        },
+        "credits_remaining": KEYS[key] if key!= "FREE" else "unlimited_free_tier"
+    })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)    response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['X-API-Latency'] = '2ms'
     return response
 
