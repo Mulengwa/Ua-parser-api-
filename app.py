@@ -16,7 +16,20 @@ def load_keys():
 
 def save_keys(keys):
     with open(KEY_FILE, 'w') as f: json.dump(keys, f)
-
+        
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    Health check endpoint for monitoring + Render.
+    No auth required. Returns 200 if server alive.
+    """
+    return jsonify({
+        "status": "healthy",
+        "service": "ua-parser-api",
+        "version": "1.0.0",
+        "timestamp": int(time.time()),
+        "uptime_target": "99.9%"
+    }), 200
 KEYS = load_keys()
 
 @app.after_request
