@@ -42,7 +42,7 @@ def add_headers(response):
 def parse_ua():
     key = request.args.get('key', '')
     ua_string = request.args.get('ua', '')
-
+    
     if key not in KEYS or KEYS[key] <= 0:
         return jsonify({
             "error": "No credits",
