@@ -36,7 +36,11 @@ def verify_signature(payload, signature):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "UA Parser API Live", "endpoints": ["/parse", "/webhook", "/validate"]})
+    return jsonify({"status": "UA Parser API Live", "endpoints": ["/parse", "/webhook", "/validate", "/health"]})
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok", "timestamp": str(datetime.now())}), 200
 
 @app.route('/parse')
 def parse_ua():
