@@ -25,6 +25,7 @@ def health():
 def parse():
     key = request.args.get('key', '')
     ua_string = request.args.get('ua', '')
+
     if key not in KEYS or KEYS[key] <= 0:
         return jsonify({
             "error": "Rate limit exceeded or invalid key",
@@ -33,10 +34,13 @@ def parse():
             "free_tier": "Email mulengwa6@gmail.com for 1000 free requests",
             "docs": "https://ua-parser-api-zsql.onrender.com/docs"
         }), 402
+
     if not ua_string:
         return jsonify({"error": "Missing ua parameter"}), 400
+
     if key!= "FREE":
         KEYS[key] -= 1
+
     parsed = user_agent_parser.Parse(ua_string)
     return jsonify({
         "browser": parsed['user_agent'],
@@ -46,5 +50,6 @@ def parse():
     })
 
 if __name__ == '__main__':
+    from waitress import serve
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    serve(app, host='0.0.0.0', port=port)
