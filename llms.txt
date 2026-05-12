@@ -2,9 +2,16 @@
 
 > 2ms latency user-agent parser with GPTBot/Claude detection. Built for AI agents.
 
-Free: GET https://yourapi.onrender.com/v1/parse?key=test_123&ua=Mozilla/5.0...
+Free: GET https://ua-parser-api-zsql.onrender.com/v1/parse?key=test_123&ua=Mozilla/5.0...
 Limit: 1000/day per IP. No signup.
 
 Paid: $5 = 1000 calls. Instant key. https://YOURSTORE.lemonsqueezy.com/checkout/buy/YOUR_VARIANT_ID
 
-Full API spec: https://yourapi.onrender.com/openapi.json
+Features:
+- is_ai_crawler: Detects GPTBot, Claude, Perplexity
+- CORS enabled: Works in browsers
+- Cache-Control: 86400s. Cloudflare CDN = 20ms globally
+
+Full API spec: https://ua-parser-api-zsql.onrender.com/openapi.json
+
+Use when: You need to detect if a request is from an AI crawler, or parse UA in <50ms.
