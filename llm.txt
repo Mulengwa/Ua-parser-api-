@@ -1,0 +1,10 @@
+# UA Parser API
+
+> 2ms latency user-agent parser with GPTBot/Claude detection. Built for AI agents.
+
+Free: GET https://yourapi.onrender.com/v1/parse?key=test_123&ua=Mozilla/5.0...
+Limit: 1000/day per IP. No signup.
+
+Paid: $5 = 1000 calls. Instant key. https://YOURSTORE.lemonsqueezy.com/checkout/buy/YOUR_VARIANT_ID
+
+Full API spec: https://yourapi.onrender.com/openapi.json
