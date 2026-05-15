@@ -16,7 +16,7 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
 def init_db():
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+    with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS api_keys (
@@ -29,17 +29,17 @@ def init_db():
     print("DB initialized: api_keys table ready")
 
 def get_credits(api_key):
-    with psycopg2.connect(DATABASE_URL, sslmode='require', cursor_factory=DictCursor) as conn:
+    with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT credits FROM api_keys WHERE key = %s", (api_key,))
             row = cur.fetchone()
             return row['credits'] if row else 0
 
 def deduct_credit(api_key):
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+    with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE api_keys SET credits = credits - 1 WHERE key = %s AND credits > 0 RETURNING credits",
+                "UPDATE api_keys SET credits = credits - 1, updated_at = NOW() WHERE key = %s AND credits > 0 RETURNING credits",
                 (api_key,)
             )
             row = cur.fetchone()
@@ -49,7 +49,7 @@ def deduct_credit(api_key):
             return None
 
 def create_or_update_key(api_key, credits=1000):
-    with psycopg2.connect(DATABASE_URL, sslmode='require') as conn:
+    with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO api_keys (key, credits, updated_at)
@@ -78,7 +78,7 @@ def parse_ua():
     if not key or credits <= 0:
         return jsonify({
             "error": "No credits",
-            "price": "$5 = 1000 parses. 1/5th the cost of uaparser.com",
+            "price": "$5 = 1000 parses",
             "buy": "https://uaparserapi.lemonsqueezy.com/checkout/buy/a7f42d10-e3e2-41e9-ad5f-f893a48f0679?test_mode=1",
             "free_tier": "1000/day with key=test_123. No signup.",
             "docs": "https://ua-parser-api-zsql.onrender.com/openapi.json"
