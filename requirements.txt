@@ -1,5 +1,5 @@
    flask==3.0.0
    waitress==3.0.0
    user-agents==2.2.0
-   psycopg[c]
+   psycopg[binary]>=3.2
 
