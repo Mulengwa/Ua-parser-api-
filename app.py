@@ -3,8 +3,8 @@ from user_agents import parse
 from waitress import serve
 import os, hashlib, hmac
 from datetime import datetime
-import psycopg2
-from psycopg2.extras import DictCursor
+import psycopg
+from psycopg.rows import dict_row
 
 app = Flask(__name__)
 
