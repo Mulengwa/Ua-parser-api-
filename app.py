@@ -111,7 +111,17 @@ def parse_ua():
 @app.route('/v1/webhook', methods=['POST'])
 def lemon_webhook():
     signature = request.headers.get('X-Signature', '')
-    digest = hmac.new(LEMON_WEBHOOK_SECRET.encode(), request.get_data(), hashlib.sha256).hexdigest()
+
+    if not LEMON_WEBHOOK_SECRET:
+        print("ERROR: LEMON_WEBHOOK_SECRET not set")
+        return jsonify({"error": "Server misconfigured"}), 500
+
+    digest = hmac.new(
+        LEMON_WEBHOOK_SECRET.encode(),
+        request.get_data(),
+        hashlib.sha256
+    ).hexdigest()
+
     if not hmac.compare_digest(signature, digest):
         return jsonify({"error": "Invalid signature"}), 401
 
