@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, render_template_string
 from user_agents import parse
 from waitress import serve
 import os, hashlib, hmac, json, uuid, time
@@ -16,22 +16,17 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
 # BINANCE USDT CONFIG - new payment provider
-TRONGRID_API_KEY = os.environ.get("TRONGRID_API_KEY") # Get free key at trongrid.io
-USDT_TRC20_ADDRESS = os.environ.get("USDT_TRC20_ADDRESS") # Your Binance USDT TRC20 address
-USDT_PRICE_USD = float(os.environ.get("USDT_PRICE_USD", "5.00")) # Price per 1000 credits
-TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" # USDT TRC20 contract address
+TRONGRID_API_KEY = os.environ.get("TRONGRID_API_KEY")
+USDT_TRC20_ADDRESS = os.environ.get("USDT_TRC20_ADDRESS")
+USDT_PRICE_USD = float(os.environ.get("USDT_PRICE_USD", "5.00"))
+TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 
-# Fail fast if DB is not configured
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 if not USDT_TRC20_ADDRESS:
     raise RuntimeError("USDT_TRC20_ADDRESS not set")
 
 def init_db():
-    """
-    Initialize database tables on startup.
-    Orders table now tracks Binance USDT payments.
-    """
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -133,8 +128,8 @@ def parse_ua():
             "error": "No credits",
             "price": f"${USDT_PRICE_USD} = 1000 parses",
             "buy": "/create-order",
-            "free_tier": "1000/day with key=test_123",
-            "docs": "/openapi.json"
+            "free_tier": "1000/day with key=test",
+            "docs": "/docs"
         }), 402
 
     if not ua_string:
@@ -162,12 +157,11 @@ def parse_ua():
     }), 200, {'Cache-Control': 'public, max-age=86400', 'CDN-Cache-Control': 'max-age=31536000'}
 
 # ==================== BINANCE USDT PAYMENT ROUTES ====================
-@app.route('/create-order', methods=['POST'])
+@app.route('/create-order', methods=['POST', 'GET'])
 def create_order():
-    """
-    Create a new USDT payment order.
-    Returns address, amount, and memo for customer to send payment.
-    """
+    if request.method == 'GET':
+        return jsonify({"message": "POST JSON with {\"email\":\"you@example.com\"} to create order"})
+
     data = request.get_json() or {}
     email = data.get('email')
     if not email:
@@ -176,8 +170,7 @@ def create_order():
     order_id = f"order_{uuid.uuid4().hex[:8]}"
     api_key = "sk_live_" + secrets.token_urlsafe(16)
 
-    # Create order as pending
-    create_or_update_key(api_key, 0) # Create key with 0 credits
+    create_or_update_key(api_key, 0)
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -197,10 +190,6 @@ def create_order():
 
 @app.route('/check-payment/<order_id>')
 def check_payment(order_id):
-    """
-    Check if payment for order_id has been received and confirmed on Tron.
-    Frontend polls this every 5s after showing payment instructions.
-    """
     with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
@@ -212,14 +201,9 @@ def check_payment(order_id):
     if order['status'] == 'paid':
         return jsonify({"status": "paid", "api_key": order['api_key']})
 
-    # Query TronGrid for TRC20 transactions to your address
     url = f"https://api.trongrid.io/v1/accounts/{USDT_TRC20_ADDRESS}/transactions/trc20"
     headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-    params = {
-        "limit": 50,
-        "contract_address": TRC20_CONTRACT,
-        "only_confirmed": "true"
-    }
+    params = {"limit": 50, "contract_address": TRC20_CONTRACT, "only_confirmed": "true"}
 
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
@@ -230,8 +214,7 @@ def check_payment(order_id):
         return jsonify({"status": "pending", "error": "chain_check_failed"}), 200
 
     for tx in txs:
-        # Check if tx matches: correct address, amount, memo, and confirmed
-        amount_received = float(tx.get('value', 0)) / 1e6 # USDT has 6 decimals
+        amount_received = float(tx.get('value', 0)) / 1e6
         memo = tx.get('data', '')
 
         if (tx.get('to') == USDT_TRC20_ADDRESS and
@@ -239,14 +222,12 @@ def check_payment(order_id):
             memo == order_id and
             tx.get('confirmed') == True):
 
-            # Payment confirmed
             with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE orders SET status = 'paid', tx_hash = %s WHERE order_id = %s",
                                 (tx['transaction_id'], order_id))
                 conn.commit()
 
-            # Fulfill order: add credits and send email
             create_or_update_key(order['api_key'], 1000)
             send_api_key_email(order['email'], order['api_key'])
             print(f"FULFILLED ORDER {order_id} - TX: {tx['transaction_id']}")
@@ -263,17 +244,71 @@ def openapi():
 def llms_txt():
     return send_from_directory('.', 'llms.txt')
 
+# ==================== LANDING PAGE ====================
 @app.route('/')
 def home():
-    return jsonify({
-        "service": "UA Parser for Humans + AI Agents",
-        "latency": "2ms avg",
-        "free_tier": "1000/day key=test_123",
-        "paid": f"${USDT_PRICE_USD}/1000. Pay with USDT TRC20.",
-        "checkout": "/create-order",
-        "health": "/health",
-        "schema": "/openapi.json"
-    })
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>UA Parser API</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                   max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
+            h1 { color: #111; }
+           .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+            textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
+                       border: 1px solid #ddd; border-radius: 8px; }
+            button { background: #000; color: #fff; border: none; padding: 12px 24px;
+                     border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
+            button:hover { background: #333; }
+            pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
+           .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
+                     border-radius: 20px; font-size: 14px; display: inline-block; }
+            a { color: #0969da; text-decoration: none; }
+        </style>
+    </head>
+    <body>
+        <h1>UA Parser for Humans + AI Agents</h1>
+        <p class="badge">1000 free requests/day with key=test</p>
+        <p>Fast, accurate User-Agent parsing. 2ms avg latency. No signup needed to test.</p>
+
+        <div class="card">
+            <h3>Try it now</h3>
+            <textarea id="ua" placeholder="Paste User-Agent here...">Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36</textarea>
+            <button onclick="testAPI()">Run Test</button>
+            <pre id="result">Result will appear here...</pre>
+        </div>
+
+        <div class="card">
+            <h3>Ready to go beyond free?</h3>
+            <p>$5 for 10,000 requests. Pay with USDT TRC20.</p>
+            <a href="/create-order"><button>Get API Key</button></a>
+        </div>
+
+        <p><a href="/docs">📖 API Docs</a> | <a href="/openapi.json">OpenAPI Spec</a></p>
+
+        <script>
+            async function testAPI() {
+                const ua = document.getElementById('ua').value;
+                const resultEl = document.getElementById('result');
+                resultEl.textContent = 'Loading...';
+
+                try {
+                    const res = await fetch(`/v1/parse?key=test&ua=${encodeURIComponent(ua)}`);
+                    const data = await res.json();
+                    resultEl.textContent = JSON.stringify(data, null, 2);
+                } catch (e) {
+                    resultEl.textContent = 'Error: ' + e.message;
+                }
+            }
+            testAPI();
+        </script>
+    </body>
+    </html>
+    """
+    return html
 
 if __name__ == '__main__':
     init_db()
