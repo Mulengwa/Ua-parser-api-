@@ -119,7 +119,7 @@ def send_api_key_email(to_email, api_key):
         return
 
     payload = {
-        "from": "UA Parser API <noreply@yourdomain.com>",
+        "from": "UA Parser API <onboarding@resend.dev>",
         "to": [to_email],
         "subject": "Your UA Parser API Key is Ready",
         "html": f"""
@@ -172,7 +172,7 @@ def parse_ua():
             "error": "No credits",
             "price": f"${USDT_PRICE_USD} = 1000 parses",
             "buy": "/create-order",
-            "free_tier": "1000/day with key=test", # FIXED: was test_123
+            "free_tier": "1000/day with key=test",
             "docs": "/docs"
         }), 402
 
@@ -279,145 +279,4 @@ def check_payment(order_id):
 
     # Check each transaction for matching amount and memo
     for tx in txs:
-        amount_received = float(tx.get('value', 0)) / 1e6 # USDT has 6 decimals
-        memo = tx.get('data', '')
-
-        if (tx.get('to') == USDT_TRC20_ADDRESS and
-            abs(amount_received - float(order['amount'])) < 0.001 and
-            memo == order_id and
-            tx.get('confirmed') == True):
-
-            # Payment confirmed - mark as paid
-            with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
-                with conn.cursor() as cur:
-                    cur.execute("UPDATE orders SET status = 'paid', tx_hash = %s WHERE order_id = %s",
-                                (tx['transaction_id'], order_id))
-                conn.commit()
-
-            # Fulfill order: add 1000 credits and send email
-            create_or_update_key(order['api_key'], 1000)
-            send_api_key_email(order['email'], order['api_key'])
-            print(f"FULFILLED ORDER {order_id} - TX: {tx['transaction_id']}")
-
-            return jsonify({"status": "paid", "api_key": order['api_key'], "tx_hash": tx['transaction_id']})
-
-    return jsonify({"status": "pending"}), 200
-
-@app.route('/openapi.json')
-def openapi():
-    """
-    Serve OpenAPI spec file for Swagger UI and AI agents.
-    """
-    return send_from_directory('.', 'openapi.json')
-
-@app.route('/llms.txt')
-def llms_txt():
-    """
-    Serve llms.txt for AI crawlers and documentation tools.
-    """
-    return send_from_directory('.', 'llms.txt')
-
-# ==================== LANDING PAGE ====================
-@app.route('/')
-def home():
-    """
-    Landing page with interactive API tester.
-    Lets users try the API without reading docs.
-    """
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>UA Parser API</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                   max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
-            h1 { color: #111; }
-          .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
-            textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
-                       border: 1px solid #ddd; border-radius: 8px; }
-            button { background: #000; color: #fff; border: none; padding: 12px 24px;
-                     border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
-            button:hover { background: #333; }
-            pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
-          .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
-                     border-radius: 20px; font-size: 14px; display: inline-block; }
-            a { color: #0969da; text-decoration: none; }
-        </style>
-    </head>
-    <body>
-        <h1>UA Parser for Humans + AI Agents</h1>
-        <p class="badge">1000 free requests/day with key=test</p>
-        <p>Fast, accurate User-Agent parsing. 2ms avg latency. No signup needed to test.</p>
-
-        <div class="card">
-            <h3>Try it now</h3>
-            <textarea id="ua" placeholder="Paste User-Agent here...">Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36</textarea>
-            <button onclick="testAPI()">Run Test</button>
-            <pre id="result">Result will appear here...</pre>
-        </div>
-
-        <div class="card">
-            <h3>Ready to go beyond free?</h3>
-            <p>$5 for 10,000 requests. Pay with USDT TRC20.</p>
-            <a href="/create-order"><button>Get API Key</button></a>
-        </div>
-
-        <p><a href="/docs">📖 API Docs</a> | <a href="/openapi.json">OpenAPI Spec</a></p>
-
-        <script>
-            async function testAPI() {
-                const ua = document.getElementById('ua').value;
-                const resultEl = document.getElementById('result');
-                resultEl.textContent = 'Loading...';
-
-                try {
-                    const res = await fetch(`/v1/parse?key=test&ua=${encodeURIComponent(ua)}`);
-                    const data = await res.json();
-                    resultEl.textContent = JSON.stringify(data, null, 2);
-                } catch (e) {
-                    resultEl.textContent = 'Error: ' + e.message;
-                }
-            }
-            testAPI();
-        </script>
-    </body>
-    </html>
-    """
-    return html
-
-# ==================== SWAGGER DOCS ====================
-@app.route('/docs')
-def docs():
-    """
-    Interactive API documentation using Swagger UI.
-    Loads openapi.json and provides a UI to test endpoints.
-    """
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>UA Parser API Docs</title>
-        <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
-    </head>
-    <body>
-        <div id="swagger-ui"></div>
-        <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-        <script>
-            SwaggerUIBundle({
-                url: '/openapi.json',
-                dom_id: '#swagger-ui',
-                presets: [SwaggerUIBundle.presets.apis]
-            })
-        </script>
-    </body>
-    </html>
-    """
-    return html
-
-if __name__ == '__main__':
-    # Initialize database and start server
-    init_db()
-    port = int(os.environ.get("PORT", 10000))
-    serve(app, host="0.0.0.0", port=port)
+        amount_received = float(tx.get('value', 0)) /
