@@ -16,7 +16,7 @@ app = Flask(__name__)
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "change_me")
 # PostgreSQL connection string from Render/Neon/Supabase
 DATABASE_URL = os.environ.get("DATABASE_URL")
-# Resend API key for sending emails
+# Resend API key for sending emails - set this in Render env vars
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
 # ==================== BINANCE USDT CONFIG ====================
@@ -41,6 +41,7 @@ def init_db():
     Creates api_keys and orders tables if they don't exist.
     Orders table tracks Binance USDT payments.
     """
+    # Connect to PostgreSQL database with SSL required for security
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             # Table for storing API keys and remaining credits
@@ -72,6 +73,7 @@ def get_credits(api_key):
     Get remaining credits for a given API key.
     Returns 0 if key doesn't exist.
     """
+    # Connect to DB and fetch credits for the key
     with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT credits FROM api_keys WHERE key = %s", (api_key,))
@@ -83,6 +85,7 @@ def deduct_credit(api_key):
     Deduct 1 credit from the API key if credits > 0.
     Returns remaining credits or None if no credits left.
     """
+    # Update credits atomically to prevent race conditions
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -100,6 +103,7 @@ def create_or_update_key(api_key, credits=1000):
     Create a new API key or add credits to existing key.
     Used for both free tier setup and paid fulfillment.
     """
+    # Insert new key or update existing key's credits
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -113,11 +117,14 @@ def create_or_update_key(api_key, credits=1000):
 def send_api_key_email(to_email, api_key):
     """
     Send the API key to customer email using Resend.
+    Only sends if RESEND_API_KEY is set in environment.
     """
+    # Check if Resend API key is configured
     if not RESEND_API_KEY:
         print("ERROR: RESEND_API_KEY not set - email not sent")
         return
 
+    # Build email payload for Resend API
     payload = {
         "from": "UA Parser API <onboarding@resend.dev>",
         "to": [to_email],
@@ -130,12 +137,15 @@ def send_api_key_email(to_email, api_key):
         <p>You have 1000 credits. Each request uses 1 credit.</p>
         """
     }
+    # Set headers for Resend API authentication
     headers = {"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}
     try:
+        # Send POST request to Resend API
         r = requests.post("https://api.resend.com/emails", json=payload, headers=headers, timeout=10)
         r.raise_for_status()
         print(f"EMAIL SENT to {to_email}")
     except Exception as e:
+        # Log any errors if email fails to send
         print(f"ERROR sending email: {e}")
 
 @app.after_request
@@ -144,7 +154,9 @@ def add_headers(response):
     Add CORS and custom headers to all responses.
     X-API-Latency is for marketing/social proof.
     """
+    # Allow all origins for CORS
     response.headers['Access-Control-Allow-Origin'] = '*'
+    # Add custom latency header for display
     response.headers['X-API-Latency'] = '2ms'
     return response
 
@@ -152,6 +164,7 @@ def add_headers(response):
 def health():
     """
     Health check endpoint for Render and monitoring tools.
+    Returns OK status with timestamp.
     """
     return jsonify({"status": "ok", "latency": "2ms", "timestamp": str(datetime.utcnow())}), 200
 
@@ -162,6 +175,7 @@ def parse_ua():
     Requires key and ua parameters.
     Free tier uses key=test with 1000 requests/day.
     """
+    # Get key and ua from query parameters
     key = request.args.get('key', '')
     ua_string = request.args.get('ua', '')
 
@@ -176,22 +190,22 @@ def parse_ua():
             "docs": "/docs"
         }), 402
 
-    # Validate ua parameter
+    # Validate ua parameter is provided
     if not ua_string:
         return jsonify({"error": "Missing?ua=Mozilla/5.0..."}), 400
 
-    # Deduct 1 credit
+    # Deduct 1 credit for this request
     new_credits = deduct_credit(key)
     if new_credits is None:
         return jsonify({"error": "No credits left"}), 402
 
-    # Parse the User-Agent
+    # Parse the User-Agent string
     u = parse(ua_string)
     ua_lower = ua_string.lower()
     ai_bots = ['gptbot','chatgpt-user','claudebot','anthropic','google-extended','perplexitybot','bytespider']
     is_ai_bot = any(b in ua_lower for b in ai_bots)
 
-    # Return parsed data
+    # Return parsed data as JSON
     return jsonify({
         "browser": u.browser.family,
         "browser_version": u.browser.version_string,
@@ -211,19 +225,21 @@ def create_order():
     Create a new USDT payment order.
     GET returns instructions. POST with email creates order and returns payment details.
     """
+    # Handle GET request - show instructions
     if request.method == 'GET':
         return jsonify({"message": "POST JSON with {\"email\":\"you@example.com\"} to create order"})
 
+    # Parse JSON data from POST request
     data = request.get_json() or {}
     email = data.get('email')
     if not email:
         return jsonify({"error": "Missing email"}), 400
 
-    # Generate unique order ID and API key
+    # Generate unique order ID and API key for customer
     order_id = f"order_{uuid.uuid4().hex[:8]}"
     api_key = "sk_live_" + secrets.token_urlsafe(16)
 
-    # Create key with 0 credits and pending order
+    # Create key with 0 credits and pending order in database
     create_or_update_key(api_key, 0)
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
@@ -233,6 +249,11 @@ def create_order():
             """, (order_id, api_key, email, USDT_PRICE_USD))
         conn.commit()
 
+    # Send email with API key and payment instructions using Resend
+    # This triggers the email you were missing
+    send_api_key_email(email, api_key)
+
+    # Return payment details to customer for USDT transfer
     return jsonify({
         "order_id": order_id,
         "address": USDT_TRC20_ADDRESS,
@@ -248,6 +269,7 @@ def check_payment(order_id):
     Check if payment for order_id has been received and confirmed on Tron blockchain.
     Frontend polls this every 5s after showing payment instructions.
     """
+    # Fetch order from database
     with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
@@ -256,7 +278,7 @@ def check_payment(order_id):
     if not order:
         return jsonify({"error": "Order not found"}), 404
 
-    # If already paid, return key immediately
+    # If already paid, return key immediately without checking chain
     if order['status'] == 'paid':
         return jsonify({"status": "paid", "api_key": order['api_key']})
 
@@ -270,10 +292,12 @@ def check_payment(order_id):
     }
 
     try:
+        # Call TronGrid API to get transactions
         r = requests.get(url, headers=headers, params=params, timeout=10)
         r.raise_for_status()
         txs = r.json().get("data", [])
     except Exception as e:
+        # Log error if TronGrid fails
         print(f"TronGrid error: {e}")
         return jsonify({"status": "pending", "error": "chain_check_failed"}), 200
 
@@ -287,7 +311,7 @@ def check_payment(order_id):
             memo == order_id and
             tx.get('confirmed') == True):
 
-            # Payment confirmed - mark as paid
+            # Payment confirmed - mark as paid in database
             with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE orders SET status = 'paid', tx_hash = %s WHERE order_id = %s",
@@ -301,6 +325,7 @@ def check_payment(order_id):
 
             return jsonify({"status": "paid", "api_key": order['api_key'], "tx_hash": tx['transaction_id']})
 
+    # No matching payment found yet
     return jsonify({"status": "pending"}), 200
 
 @app.route('/openapi.json')
@@ -334,14 +359,14 @@ def home():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                    max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
             h1 { color: #111; }
-        .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+       .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
             textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
                        border: 1px solid #ddd; border-radius: 8px; }
             button { background: #000; color: #fff; border: none; padding: 12px 24px;
                      border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
             button:hover { background: #333; }
             pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
-        .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
+       .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
                      border-radius: 20px; font-size: 14px; display: inline-block; }
             a { color: #0969da; text-decoration: none; }
         </style>
