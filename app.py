@@ -12,7 +12,7 @@ import secrets
 app = Flask(__name__)
 
 # ==================== ENVIRONMENT VARIABLES ====================
-# Secret used for admin operations
+# Secret used for admin operations and API key check
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "change_me")
 # PostgreSQL connection string from Render/Neon/Supabase
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -224,6 +224,7 @@ def create_order():
     """
     Create a new USDT payment order.
     GET returns instructions. POST with email creates order and returns payment details.
+    Now requires X-API-Key header for security.
     """
     # Handle GET request - show instructions
     if request.method == 'GET':
@@ -231,6 +232,15 @@ def create_order():
 
     # Parse JSON data from POST request
     data = request.get_json() or {}
+
+    # Security check: require API key header so random people can't create orders
+    # Get X-API-Key from request headers
+    api_key_header = request.headers.get('X-API-Key')
+    # Validate header exists and matches ADMIN_SECRET from env vars
+    if not api_key_header or api_key_header!= ADMIN_SECRET:
+        return jsonify({"error": "Invalid or missing X-API-Key header"}), 401
+
+    # Get customer email from request body
     email = data.get('email')
     if not email:
         return jsonify({"error": "Missing email"}), 400
@@ -359,14 +369,14 @@ def home():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                    max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
             h1 { color: #111; }
-       .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+      .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
             textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
                        border: 1px solid #ddd; border-radius: 8px; }
             button { background: #000; color: #fff; border: none; padding: 12px 24px;
                      border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
             button:hover { background: #333; }
             pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
-       .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
+      .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
                      border-radius: 20px; font-size: 14px; display: inline-block; }
             a { color: #0969da; text-decoration: none; }
         </style>
