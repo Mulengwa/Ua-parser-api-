@@ -369,14 +369,14 @@ def home():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                    max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
             h1 { color: #111; }
-      .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+     .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
             textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
                        border: 1px solid #ddd; border-radius: 8px; }
             button { background: #000; color: #fff; border: none; padding: 12px 24px;
                      border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
             button:hover { background: #333; }
             pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
-      .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
+     .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
                      border-radius: 20px; font-size: 14px; display: inline-block; }
             a { color: #0969da; text-decoration: none; }
         </style>
@@ -451,8 +451,13 @@ def docs():
     """
     return html
 
+# ==================== INIT DB ON COLD START ====================
+# Call init_db when module loads so tables exist before first request on Render
+# This runs even when started by waitress/gunicorn, not just python app.py
+init_db()
+
 if __name__ == '__main__':
-    # Initialize database and start server
-    init_db()
+    # Initialize database and start server for local dev
+    # On Render this block doesn't run because waitress imports the app
     port = int(os.environ.get("PORT", 10000))
     serve(app, host="0.0.0.0", port=port)
