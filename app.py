@@ -8,40 +8,40 @@ from psycopg.rows import dict_row
 import requests
 import secrets
 
-# Initialize Flask app
+# ==================== APP INITIALIZATION ====================
+# Create Flask app instance - this is the main web server
 app = Flask(__name__)
 
 # ==================== ENVIRONMENT VARIABLES ====================
-# Secret used for admin operations and API key check
+# ADMIN_SECRET: Secret key for admin operations. Set in Render env vars
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "change_me")
-# PostgreSQL connection string from Render/Neon/Supabase
+# DATABASE_URL: PostgreSQL connection string from Render/Neon/Supabase
 DATABASE_URL = os.environ.get("DATABASE_URL")
-# Resend API key for sending emails - set this in Render env vars
+# RESEND_API_KEY: API key for sending emails via Resend.com
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
-# ==================== BINANCE USDT CONFIG ====================
-# TronGrid API key for checking TRC20 transactions
-TRONGRID_API_KEY = os.environ.get("TRONGRID_API_KEY") # Get free key at trongrid.io
-# Your Binance USDT TRC20 deposit address
-USDT_TRC20_ADDRESS = os.environ.get("USDT_TRC20_ADDRESS")
-# Price for 1000 credits in USD
+# ==================== NOWPAYMENTS CONFIG ====================
+# NOWPAYMENTS_API_KEY: API key from nowpayments.io dashboard for creating invoices
+NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
+# NOWPAYMENTS_IPN_SECRET: Secret used to verify webhook signatures from NowPayments
+NOWPAYMENTS_IPN_SECRET = os.environ.get("NOWPAYMENTS_IPN_SECRET")
+# USDT_PRICE_USD: Price for 1000 credits in USD. Default $5.00 if not set
 USDT_PRICE_USD = float(os.environ.get("USDT_PRICE_USD", "5.00"))
-# USDT TRC20 contract address on Tron network
-TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" # USDT TRC20 contract address
 
-# Fail fast if required env vars are missing
+# ==================== STARTUP CHECKS ====================
+# Fail fast if DATABASE_URL is missing - app can't work without DB
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
-if not USDT_TRC20_ADDRESS:
-    raise RuntimeError("USDT_TRC20_ADDRESS not set")
 
+# ==================== DATABASE FUNCTIONS ====================
 def init_db():
     """
     Initialize database tables on startup.
     Creates api_keys and orders tables if they don't exist.
-    Orders table tracks Binance USDT payments.
+    Orders table tracks NowPayments transactions.
+    Runs on module import so Render cold starts work.
     """
-    # Connect to PostgreSQL database with SSL required for security
+    # Connect to PostgreSQL with SSL required for security
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             # Table for storing API keys and remaining credits
@@ -52,19 +52,20 @@ def init_db():
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Table for tracking payment orders
+            # Table for tracking payment orders from NowPayments
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS orders (
                     order_id TEXT PRIMARY KEY,
                     api_key TEXT,
                     email TEXT,
-                    provider TEXT DEFAULT 'binance_usdt',
+                    provider TEXT DEFAULT 'nowpayments',
                     amount NUMERIC,
                     status TEXT DEFAULT 'pending',
                     tx_hash TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+        # Commit changes to database
         conn.commit()
     print("DB initialized: api_keys and orders tables ready")
 
@@ -72,31 +73,36 @@ def get_credits(api_key):
     """
     Get remaining credits for a given API key.
     Returns 0 if key doesn't exist.
-    Auto-creates test key with 1000 credits for free tier.
+    Auto-creates 'test' key with 1000 credits for free tier.
+    This ensures new users can try API immediately.
     """
     # Connect to DB and fetch credits for the key
     with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
         with conn.cursor() as cur:
+            # Query credits for this API key
             cur.execute("SELECT credits FROM api_keys WHERE key = %s", (api_key,))
             row = cur.fetchone()
 
             # Auto-create test key with 1000 credits if it doesn't exist
-            # This ensures free tier works even on fresh DB
+            # This handles fresh DB on Render cold start
             if not row and api_key == 'test':
                 cur.execute("INSERT INTO api_keys (key, credits) VALUES ('test', 1000) ON CONFLICT DO NOTHING")
                 conn.commit()
                 return 1000
 
+            # Return credits or 0 if key not found
             return row['credits'] if row else 0
 
 def deduct_credit(api_key):
     """
     Deduct 1 credit from the API key if credits > 0.
+    Uses atomic UPDATE to prevent race conditions.
     Returns remaining credits or None if no credits left.
     """
     # Update credits atomically to prevent race conditions
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
+            # Decrement credits only if > 0, return new value
             cur.execute(
                 "UPDATE api_keys SET credits = credits - 1, updated_at = NOW() WHERE key = %s AND credits > 0 RETURNING credits",
                 (api_key,)
@@ -111,6 +117,7 @@ def create_or_update_key(api_key, credits=1000):
     """
     Create a new API key or add credits to existing key.
     Used for both free tier setup and paid fulfillment.
+    ON CONFLICT handles existing keys by adding credits.
     """
     # Insert new key or update existing key's credits
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
@@ -127,6 +134,7 @@ def send_api_key_email(to_email, api_key):
     """
     Send the API key to customer email using Resend.
     Only sends if RESEND_API_KEY is set in environment.
+    Called automatically after payment webhook fires.
     """
     # Check if Resend API key is configured
     if not RESEND_API_KEY:
@@ -157,11 +165,13 @@ def send_api_key_email(to_email, api_key):
         # Log any errors if email fails to send
         print(f"ERROR sending email: {e}")
 
+# ==================== MIDDLEWARE ====================
 @app.after_request
 def add_headers(response):
     """
     Add CORS and custom headers to all responses.
     X-API-Latency is for marketing/social proof.
+    Allows frontend from any domain to call API.
     """
     # Allow all origins for CORS
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -169,11 +179,13 @@ def add_headers(response):
     response.headers['X-API-Latency'] = '2ms'
     return response
 
+# ==================== API ENDPOINTS ====================
 @app.route('/health')
 def health():
     """
     Health check endpoint for Render and monitoring tools.
     Returns OK status with timestamp.
+    Render uses this to know if app is alive.
     """
     return jsonify({"status": "ok", "latency": "2ms", "timestamp": str(datetime.utcnow())}), 200
 
@@ -183,6 +195,7 @@ def parse_ua():
     Main API endpoint: Parse a User-Agent string.
     Requires key and ua parameters.
     Free tier uses key=test with 1000 requests/day.
+    Each request deducts 1 credit.
     """
     # Get key and ua from query parameters
     key = request.args.get('key', '')
@@ -208,9 +221,10 @@ def parse_ua():
     if new_credits is None:
         return jsonify({"error": "No credits left"}), 402
 
-    # Parse the User-Agent string
+    # Parse the User-Agent string using user_agents library
     u = parse(ua_string)
     ua_lower = ua_string.lower()
+    # List of known AI crawler user agents
     ai_bots = ['gptbot','chatgpt-user','claudebot','anthropic','google-extended','perplexitybot','bytespider']
     is_ai_bot = any(b in ua_lower for b in ai_bots)
 
@@ -227,13 +241,13 @@ def parse_ua():
         "credits_left": new_credits
     }), 200, {'Cache-Control': 'public, max-age=86400', 'CDN-Cache-Control': 'max-age=31536000'}
 
-# ==================== BINANCE USDT PAYMENT ROUTES ====================
+# ==================== NOWPAYMENTS PAYMENT ROUTES ====================
 @app.route('/create-order', methods=['POST', 'GET'])
 def create_order():
     """
-    Create a new USDT payment order.
-    GET returns instructions. POST with email creates order and returns payment details.
-    Now requires X-API-Key header for security.
+    Updated: Creates NowPayments invoice. Customer only sees $5.
+    No memo/address shown. Memo handled in background.
+    GET returns instructions. POST with email creates invoice.
     """
     # Handle GET request - show instructions
     if request.method == 'GET':
@@ -241,116 +255,127 @@ def create_order():
 
     # Parse JSON data from POST request
     data = request.get_json() or {}
-
-    # Security check: require API key header so random people can't create orders
-    # Get X-API-Key from request headers
-    api_key_header = request.headers.get('X-API-Key')
-    # Validate header exists and matches ADMIN_SECRET from env vars
-    if not api_key_header or api_key_header!= ADMIN_SECRET:
-        return jsonify({"error": "Invalid or missing X-API-Key header"}), 401
-
     # Get customer email from request body
     email = data.get('email')
     if not email:
         return jsonify({"error": "Missing email"}), 400
 
-    # Generate unique order ID and API key for customer
-    order_id = f"order_{uuid.uuid4().hex[:8]}"
+    # Embed email in order_id so webhook can extract it later
+    # Format: order_email_with_underscores_random6chars
+    order_id = f"order_{email.replace('@','_').replace('.','_')}_{uuid.uuid4().hex[:6]}"
+    # Generate random API key for customer
     api_key = "sk_live_" + secrets.token_urlsafe(16)
 
     # Create key with 0 credits and pending order in database
     create_or_update_key(api_key, 0)
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
+            # Insert pending order - will be marked paid by webhook
             cur.execute("""
-                INSERT INTO orders (order_id, api_key, email, amount, status)
-                VALUES (%s, %s, %s, %s, 'pending')
+                INSERT INTO orders (order_id, api_key, email, amount, status, provider)
+                VALUES (%s, %s, %s, %s, 'pending', 'nowpayments')
             """, (order_id, api_key, email, USDT_PRICE_USD))
         conn.commit()
 
-    # Send email with API key and payment instructions using Resend
-    # This triggers the email you were missing
-    send_api_key_email(email, api_key)
-
-    # Return payment details to customer for USDT transfer
-    return jsonify({
+    # Call NowPayments API to create invoice
+    # Customer never sees USDT address or memo
+    if not NOWPAYMENTS_API_KEY:
+        return jsonify({"error": "Payment not configured"}), 500
+    
+    # Build payload for NowPayments invoice creation
+    np_payload = {
+        "price_amount": USDT_PRICE_USD,
+        "price_currency": "usd",
+        "pay_currency": "usdttrc20",  # Customer pays, you receive USDT TRC20
         "order_id": order_id,
-        "address": USDT_TRC20_ADDRESS,
-        "network": "TRC20",
-        "amount": USDT_PRICE_USD,
-        "memo": order_id,
-        "instructions": f"Send exactly {USDT_PRICE_USD} USDT TRC20 to the address above. Include memo: {order_id}. Payment confirms in ~30s."
+        "order_description": "UA Parser API - 1000 credits",
+        "ipn_callback_url": f"{request.url_root}webhook/nowpayments",  # Webhook URL
+        "success_url": f"{request.url_root}thanks"  # Redirect after payment
+    }
+    
+    # Set API key header for NowPayments
+    headers = {"x-api-key": NOWPAYMENTS_API_KEY}
+    # Make POST request to NowPayments API
+    r = requests.post("https://api.nowpayments.io/v1/invoice", json=np_payload, headers=headers, timeout=10)
+    
+    # Check if NowPayments returned error
+    if r.status_code != 200:
+        print(f"NowPayments error: {r.text}")
+        return jsonify({"error": "Payment provider error"}), 500
+    
+    # Parse invoice response
+    invoice = r.json()
+    
+    # Return checkout URL - customer gets redirected here
+    return jsonify({
+        "checkout_url": invoice['invoice_url'],
+        "order_id": order_id,
+        "message": "Customer sees $5 only. No memo needed."
     }), 200
 
-@app.route('/check-payment/<order_id>')
-def check_payment(order_id):
+@app.route('/webhook/nowpayments', methods=['POST'])
+def nowpayments_webhook():
     """
-    Check if payment for order_id has been received and confirmed on Tron blockchain.
-    Frontend polls this every 5s after showing payment instructions.
+    NowPayments calls this automatically when customer pays.
+    Customer never sees memo/address. Triggers existing email logic.
+    Verifies signature to prevent fake webhook calls.
     """
-    # Fetch order from database
-    with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
-            order = cur.fetchone()
-
-    if not order:
-        return jsonify({"error": "Order not found"}), 404
-
-    # If already paid, return key immediately without checking chain
-    if order['status'] == 'paid':
-        return jsonify({"status": "paid", "api_key": order['api_key']})
-
-    # Query TronGrid for TRC20 transactions to your address
-    url = f"https://api.trongrid.io/v1/accounts/{USDT_TRC20_ADDRESS}/transactions/trc20"
-    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-    params = {
-        "limit": 50,
-        "contract_address": TRC20_CONTRACT,
-        "only_confirmed": "true"
-    }
-
-    try:
-        # Call TronGrid API to get transactions
-        r = requests.get(url, headers=headers, params=params, timeout=10)
-        r.raise_for_status()
-        txs = r.json().get("data", [])
-    except Exception as e:
-        # Log error if TronGrid fails
-        print(f"TronGrid error: {e}")
-        return jsonify({"status": "pending", "error": "chain_check_failed"}), 200
-
-    # Check each transaction for matching amount and memo
-    for tx in txs:
-        amount_received = float(tx.get('value', 0)) / 1e6 # USDT has 6 decimals
-        memo = tx.get('data', '')
-
-        if (tx.get('to') == USDT_TRC20_ADDRESS and
-            abs(amount_received - float(order['amount'])) < 0.001 and
-            memo == order_id and
-            tx.get('confirmed') == True):
-
-            # Payment confirmed - mark as paid in database
+    # Get signature from NowPayments header
+    received_sig = request.headers.get('x-nowpayments-sig')
+    # Get raw payload for signature verification
+    payload = request.get_data()
+    
+    # Check if IPN secret is configured
+    if not NOWPAYMENTS_IPN_SECRET:
+        return 'IPN secret not set', 500
+    
+    # Calculate expected signature using HMAC SHA512
+    calc_sig = hmac.new(
+        NOWPAYMENTS_IPN_SECRET.encode(),
+        payload,
+        hashlib.sha512
+    ).hexdigest()
+    
+    # Verify signature matches - prevents spoofing
+    if not hmac.compare_digest(received_sig or '', calc_sig):
+        return 'Invalid signature', 403
+    
+    # Parse JSON payload
+    data = request.get_json()
+    
+    # Only fulfill when payment is actually confirmed on blockchain
+    if data.get('payment_status') == 'finished':
+        order_id = data.get('order_id')
+        amount = float(data.get('price_amount', 0))
+        
+        # Fetch order from DB to get email and api_key
+        with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
+                order = cur.fetchone()
+        
+        # Check if order exists, not already paid, and amount is correct
+        if order and order['status'] != 'paid' and amount >= USDT_PRICE_USD:
+            # Mark order as paid and store transaction hash
             with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE orders SET status = 'paid', tx_hash = %s WHERE order_id = %s",
-                                (tx['transaction_id'], order_id))
-                conn.commit()
+                                (data.get('txid'), order_id))
+                    conn.commit()
+            
+            # Fulfill order using existing functions
+            create_or_update_key(order['api_key'], 1000)  # Add 1000 credits
+            send_api_key_email(order['email'], order['api_key'])  # Send email
+            print(f"NOWPAYMENTS FULFILLED {order_id} - TX: {data.get('txid')}")
+    
+    return 'ok', 200
 
-            # Fulfill order: add 1000 credits and send email
-            create_or_update_key(order['api_key'], 1000)
-            send_api_key_email(order['email'], order['api_key'])
-            print(f"FULFILLED ORDER {order_id} - TX: {tx['transaction_id']}")
-
-            return jsonify({"status": "paid", "api_key": order['api_key'], "tx_hash": tx['transaction_id']})
-
-    # No matching payment found yet
-    return jsonify({"status": "pending"}), 200
-
+# ==================== STATIC FILES ====================
 @app.route('/openapi.json')
 def openapi():
     """
     Serve OpenAPI spec file for Swagger UI and AI agents.
+    AI agents like Claude/ChatGPT use this to auto-discover API.
     """
     return send_from_directory('.', 'openapi.json')
 
@@ -358,6 +383,7 @@ def openapi():
 def llms_txt():
     """
     Serve llms.txt for AI crawlers and documentation tools.
+    Tells AI agents what this API does and how to use it.
     """
     return send_from_directory('.', 'llms.txt')
 
@@ -367,6 +393,7 @@ def home():
     """
     Landing page with interactive API tester.
     Lets users try the API without reading docs.
+    Includes Buy $5 button that redirects to NowPayments.
     """
     html = """
     <!DOCTYPE html>
@@ -378,16 +405,17 @@ def home():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                    max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
             h1 { color: #111; }
-    .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+            .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
             textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
                        border: 1px solid #ddd; border-radius: 8px; }
             button { background: #000; color: #fff; border: none; padding: 12px 24px;
                      border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
             button:hover { background: #333; }
             pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
-    .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
+            .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
                      border-radius: 20px; font-size: 14px; display: inline-block; }
             a { color: #0969da; text-decoration: none; }
+            input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; margin: 10px 0; }
         </style>
     </head>
     <body>
@@ -404,18 +432,19 @@ def home():
 
         <div class="card">
             <h3>Ready to go beyond free?</h3>
-            <p>$5 for 10,000 requests. Pay with USDT TRC20.</p>
-            <a href="/create-order"><button>Get API Key</button></a>
+            <p>$5 for 1000 requests. Card or crypto. No memo needed.</p>
+            <input id="email" type="email" placeholder="Enter your email">
+            <button onclick="buyAPI()">Buy $5</button>
         </div>
 
         <p><a href="/docs">📖 API Docs</a> | <a href="/openapi.json">OpenAPI Spec</a></p>
 
         <script>
+            // Test API button - calls /v1/parse with test key
             async function testAPI() {
                 const ua = document.getElementById('ua').value;
                 const resultEl = document.getElementById('result');
                 resultEl.textContent = 'Loading...';
-
                 try {
                     const res = await fetch(`/v1/parse?key=test&ua=${encodeURIComponent(ua)}`);
                     const data = await res.json();
@@ -423,6 +452,19 @@ def home():
                 } catch (e) {
                     resultEl.textContent = 'Error: ' + e.message;
                 }
+            }
+            // Buy button - creates order and redirects to NowPayments
+            async function buyAPI() {
+                const email = document.getElementById('email').value;
+                if (!email) return alert('Enter email first');
+                const res = await fetch('/create-order', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email})
+                });
+                const data = await res.json();
+                if (data.checkout_url) window.location.href = data.checkout_url;
+                else alert(data.error || 'Error');
             }
             testAPI();
         </script>
