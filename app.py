@@ -1,24 +1,58 @@
 from flask import Flask, request, jsonify, send_from_directory
 from user_agents import parse
 from waitress import serve
-import os, hashlib, hmac, json, uuid, time
+import os, hashlib, hmac, json, uuid, time, re # Added 're' for email validation
 from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
 import requests
 import secrets
 
+# ==================== FLASK-LIMITER IMPORTS ====================
+# CRITICAL FIX #2: Import rate limiting to prevent DoS and free tier abuse
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
 # ==================== APP INITIALIZATION ====================
 # Create Flask app instance - this is the main web server
 app = Flask(__name__)
 
+# ==================== SECURITY CONSTANTS ====================
+# CRITICAL FIX #2: Rate limiting defaults - 200/day, 50/hour per IP
+# CRITICAL FIX #5: Max UA string length to prevent memory exhaustion DoS
+MAX_UA_LENGTH = 5000
+# HIGH FIX #4: Email validation constants
+MAX_EMAIL_LENGTH = 254
+EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+# HIGH FIX #6: CORS allowed origins from env var
+ALLOWED_ORIGINS = set(
+    os.environ.get("ALLOWED_ORIGINS", "").split(",")
+) if os.environ.get("ALLOWED_ORIGINS") else set()
+
+# ==================== RATE LIMITER SETUP ====================
+# CRITICAL FIX #2: Initialize Flask-Limiter after app creation
+# storage_uri="memory://" is fine for single Render instance. Use Redis for multi-instance later
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
+
 # ==================== ENVIRONMENT VARIABLES ====================
-# ADMIN_SECRET: Secret key for admin operations. Set in Render env vars
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "change_me")
+# CRITICAL FIX #1: ADMIN_SECRET - removed "change_me" default to prevent unauthorized access
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET")
+if not ADMIN_SECRET:
+    raise RuntimeError("ADMIN_SECRET environment variable must be set")
 # DATABASE_URL: PostgreSQL connection string from Render/Neon/Supabase
 DATABASE_URL = os.environ.get("DATABASE_URL")
 # RESEND_API_KEY: API key for sending emails via Resend.com
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+# MEDIUM FIX #8: Configurable from email domain to avoid spam folder
+RESEND_FROM_EMAIL = os.environ.get(
+    "RESEND_FROM_EMAIL",
+    "noreply@ua-parser-api.com"
+)
 
 # ==================== NOWPAYMENTS CONFIG ====================
 # NOWPAYMENTS_API_KEY: API key from nowpayments.io dashboard for creating invoices
@@ -32,6 +66,26 @@ USDT_PRICE_USD = float(os.environ.get("USDT_PRICE_USD", "5.00"))
 # Fail fast if DATABASE_URL is missing - app can't work without DB
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
+
+# ==================== HELPER FUNCTIONS ====================
+# HIGH FIX #4: Email validation function to prevent spam/abuse
+def validate_email(email):
+    """
+    Validate email address format and length.
+    Returns True if valid, False otherwise.
+    Prevents database pollution and spam attacks.
+    """
+    if not email or not isinstance(email, str):
+        return False
+
+    email = email.strip().lower()
+
+    # Check length bounds
+    if len(email) > MAX_EMAIL_LENGTH or len(email) < 5:
+        return False
+
+    # Regex pattern match
+    return bool(re.match(EMAIL_PATTERN, email))
 
 # ==================== DATABASE FUNCTIONS ====================
 def init_db():
@@ -135,6 +189,7 @@ def send_api_key_email(to_email, api_key):
     Send the API key to customer email using Resend.
     Only sends if RESEND_API_KEY is set in environment.
     Called automatically after payment webhook fires.
+    MEDIUM FIX #8: Uses RESEND_FROM_EMAIL env var instead of hardcoded resend.dev
     """
     # Check if Resend API key is configured
     if not RESEND_API_KEY:
@@ -143,7 +198,7 @@ def send_api_key_email(to_email, api_key):
 
     # Build email payload for Resend API
     payload = {
-        "from": "UA Parser API <onboarding@resend.dev>",
+        "from": f"UA Parser API <{RESEND_FROM_EMAIL}>", # MEDIUM FIX #8: Configurable domain
         "to": [to_email],
         "subject": "Your UA Parser API Key is Ready",
         "html": f"""
@@ -170,17 +225,26 @@ def send_api_key_email(to_email, api_key):
 def add_headers(response):
     """
     Add CORS and custom headers to all responses.
+    HIGH FIX #6: Restricts CORS to configured origins instead of allowing '*'
     X-API-Latency is for marketing/social proof.
-    Allows frontend from any domain to call API.
     """
-    # Allow all origins for CORS
-    response.headers['Access-Control-Allow-Origin'] = '*'
+    # HIGH FIX #6: Restrict CORS to allowed origins for security
+    origin = request.headers.get('Origin')
+
+    # Allow localhost for dev, restrict in prod
+    if origin == 'http://localhost:3000' or origin in ALLOWED_ORIGINS:
+        response.headers['Access-Control-Allow-Origin'] = origin
+    elif not ALLOWED_ORIGINS:
+        # Backward compat for dev if no ALLOWED_ORIGINS set
+        response.headers['Access-Control-Allow-Origin'] = '*'
+
     # Add custom latency header for display
     response.headers['X-API-Latency'] = '2ms'
     return response
 
 # ==================== API ENDPOINTS ====================
 @app.route('/health')
+@limiter.exempt # CRITICAL FIX #2: Health check exempt from rate limiting for monitoring
 def health():
     """
     Health check endpoint for Render and monitoring tools.
@@ -190,16 +254,26 @@ def health():
     return jsonify({"status": "ok", "latency": "2ms", "timestamp": str(datetime.utcnow())}), 200
 
 @app.route('/v1/parse')
+@limiter.limit("100/minute") # CRITICAL FIX #2: Rate limit main endpoint to 100/min per IP
 def parse_ua():
     """
     Main API endpoint: Parse a User-Agent string.
     Requires key and ua parameters.
     Free tier uses key=test with 1000 requests/day.
     Each request deducts 1 credit.
+    HIGH FIX #5: Added UA string length validation to prevent DoS
     """
     # Get key and ua from query parameters
-    key = request.args.get('key', '')
-    ua_string = request.args.get('ua', '')
+    key = request.args.get('key', '').strip()
+    ua_string = request.args.get('ua', '').strip()
+
+    # Validate ua parameter is provided
+    if not ua_string:
+        return jsonify({"error": "Missing?ua=Mozilla/5.0..."}), 400
+
+    # HIGH FIX #5: Validate UA string length to prevent memory exhaustion
+    if len(ua_string) > MAX_UA_LENGTH:
+        return jsonify({"error": f"UA string too long (max {MAX_UA_LENGTH} chars)"}), 400
 
     # Check if key exists and has credits
     credits = get_credits(key)
@@ -212,17 +286,19 @@ def parse_ua():
             "docs": "/docs"
         }), 402
 
-    # Validate ua parameter is provided
-    if not ua_string:
-        return jsonify({"error": "Missing?ua=Mozilla/5.0..."}), 400
-
     # Deduct 1 credit for this request
     new_credits = deduct_credit(key)
     if new_credits is None:
         return jsonify({"error": "No credits left"}), 402
 
-    # Parse the User-Agent string using user_agents library
-    u = parse(ua_string)
+    # Parse the User-Agent string using user_agents library with error handling
+    # HIGH FIX #5: Added try-except to handle invalid UA strings gracefully
+    try:
+        u = parse(ua_string)
+    except Exception as e:
+        print(f"Error parsing UA: {e}")
+        return jsonify({"error": "Invalid UA string"}), 400
+
     ua_lower = ua_string.lower()
     # List of known AI crawler user agents
     ai_bots = ['gptbot','chatgpt-user','claudebot','anthropic','google-extended','perplexitybot','bytespider']
@@ -243,11 +319,14 @@ def parse_ua():
 
 # ==================== NOWPAYMENTS PAYMENT ROUTES ====================
 @app.route('/create-order', methods=['POST', 'GET'])
+@limiter.limit("5/minute") # CRITICAL FIX #2: Rate limit order creation to prevent spam
 def create_order():
     """
     Updated: Creates NowPayments invoice. Customer only sees $5.
     No memo/address shown. Memo handled in background.
     GET returns instructions. POST with email creates invoice.
+    HIGH FIX #4: Added email validation
+    MEDIUM FIX #7: Added duplicate pending order check
     """
     # Handle GET request - show instructions
     if request.method == 'GET':
@@ -256,9 +335,24 @@ def create_order():
     # Parse JSON data from POST request
     data = request.get_json() or {}
     # Get customer email from request body
-    email = data.get('email')
-    if not email:
-        return jsonify({"error": "Missing email"}), 400
+    email = data.get('email', '').strip().lower() if data.get('email') else ''
+
+    # HIGH FIX #4: Validate email format and length
+    if not validate_email(email):
+        return jsonify({"error": "Invalid email address"}), 400
+
+    # MEDIUM FIX #7: Check for existing pending order to prevent database pollution
+    with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT order_id FROM orders WHERE email = %s AND status = 'pending' LIMIT 1",
+                (email,)
+            )
+            existing = cur.fetchone()
+            if existing:
+                return jsonify({
+                    "error": "You already have a pending order. Check your email or contact support."
+                }), 409
 
     # Embed email in order_id so webhook can extract it later
     # Format: order_email_with_underscores_random6chars
@@ -281,31 +375,31 @@ def create_order():
     # Customer never sees USDT address or memo
     if not NOWPAYMENTS_API_KEY:
         return jsonify({"error": "Payment not configured"}), 500
-    
+
     # Build payload for NowPayments invoice creation
     np_payload = {
         "price_amount": USDT_PRICE_USD,
         "price_currency": "usd",
-        "pay_currency": "usdttrc20",  # Customer pays, you receive USDT TRC20
+        "pay_currency": "usdttrc20", # Customer pays, you receive USDT TRC20
         "order_id": order_id,
         "order_description": "UA Parser API - 1000 credits",
-        "ipn_callback_url": f"{request.url_root}webhook/nowpayments",  # Webhook URL
-        "success_url": f"{request.url_root}thanks"  # Redirect after payment
+        "ipn_callback_url": f"{request.url_root}webhook/nowpayments", # Webhook URL
+        "success_url": f"{request.url_root}thanks" # MEDIUM FIX #9: Redirect to /thanks page
     }
-    
+
     # Set API key header for NowPayments
     headers = {"x-api-key": NOWPAYMENTS_API_KEY}
     # Make POST request to NowPayments API
     r = requests.post("https://api.nowpayments.io/v1/invoice", json=np_payload, headers=headers, timeout=10)
-    
+
     # Check if NowPayments returned error
-    if r.status_code != 200:
+    if r.status_code!= 200:
         print(f"NowPayments error: {r.text}")
         return jsonify({"error": "Payment provider error"}), 500
-    
+
     # Parse invoice response
     invoice = r.json()
-    
+
     # Return checkout URL - customer gets redirected here
     return jsonify({
         "checkout_url": invoice['invoice_url'],
@@ -314,64 +408,77 @@ def create_order():
     }), 200
 
 @app.route('/webhook/nowpayments', methods=['POST'])
+@limiter.exempt # CRITICAL FIX #2: Webhook exempt from rate limiting so NowPayments can always reach it
 def nowpayments_webhook():
     """
     NowPayments calls this automatically when customer pays.
     Customer never sees memo/address. Triggers existing email logic.
-    Verifies signature to prevent fake webhook calls.
+    CRITICAL FIX #3: Verifies signature with explicit missing header check to prevent bypass
     """
     # Get signature from NowPayments header
     received_sig = request.headers.get('x-nowpayments-sig')
+
+    # CRITICAL FIX #3: MUST have signature - fail if missing instead of using empty string fallback
+    if not received_sig:
+        print("ERROR: Missing x-nowpayments-sig header")
+        return 'Invalid signature', 403
+
     # Get raw payload for signature verification
     payload = request.get_data()
-    
+
     # Check if IPN secret is configured
     if not NOWPAYMENTS_IPN_SECRET:
         return 'IPN secret not set', 500
-    
+
     # Calculate expected signature using HMAC SHA512
     calc_sig = hmac.new(
         NOWPAYMENTS_IPN_SECRET.encode(),
         payload,
         hashlib.sha512
     ).hexdigest()
-    
+
     # Verify signature matches - prevents spoofing
-    if not hmac.compare_digest(received_sig or '', calc_sig):
+    if not hmac.compare_digest(received_sig, calc_sig):
+        print(f"ERROR: Signature mismatch")
         return 'Invalid signature', 403
-    
-    # Parse JSON payload
-    data = request.get_json()
-    
+
+    # Parse JSON payload with error handling
+    try:
+        data = request.get_json()
+    except Exception as e:
+        print(f"ERROR: Invalid JSON in webhook: {e}")
+        return 'Invalid payload', 400
+
     # Only fulfill when payment is actually confirmed on blockchain
     if data.get('payment_status') == 'finished':
         order_id = data.get('order_id')
         amount = float(data.get('price_amount', 0))
-        
+
         # Fetch order from DB to get email and api_key
         with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
                 order = cur.fetchone()
-        
+
         # Check if order exists, not already paid, and amount is correct
-        if order and order['status'] != 'paid' and amount >= USDT_PRICE_USD:
+        if order and order['status']!= 'paid' and amount >= USDT_PRICE_USD:
             # Mark order as paid and store transaction hash
             with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE orders SET status = 'paid', tx_hash = %s WHERE order_id = %s",
                                 (data.get('txid'), order_id))
                     conn.commit()
-            
+
             # Fulfill order using existing functions
-            create_or_update_key(order['api_key'], 1000)  # Add 1000 credits
-            send_api_key_email(order['email'], order['api_key'])  # Send email
+            create_or_update_key(order['api_key'], 1000) # Add 1000 credits
+            send_api_key_email(order['email'], order['api_key']) # Send email
             print(f"NOWPAYMENTS FULFILLED {order_id} - TX: {data.get('txid')}")
-    
+
     return 'ok', 200
 
 # ==================== STATIC FILES ====================
 @app.route('/openapi.json')
+@limiter.exempt # CRITICAL FIX #2: Static files exempt from rate limiting
 def openapi():
     """
     Serve OpenAPI spec file for Swagger UI and AI agents.
@@ -380,6 +487,7 @@ def openapi():
     return send_from_directory('.', 'openapi.json')
 
 @app.route('/llms.txt')
+@limiter.exempt # CRITICAL FIX #2: Static files exempt from rate limiting
 def llms_txt():
     """
     Serve llms.txt for AI crawlers and documentation tools.
@@ -389,6 +497,7 @@ def llms_txt():
 
 # ==================== LANDING PAGE ====================
 @app.route('/')
+@limiter.exempt # CRITICAL FIX #2: Landing page exempt from rate limiting
 def home():
     """
     Landing page with interactive API tester.
@@ -405,14 +514,14 @@ def home():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                    max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
             h1 { color: #111; }
-            .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+           .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
             textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
                        border: 1px solid #ddd; border-radius: 8px; }
             button { background: #000; color: #fff; border: none; padding: 12px 24px;
                      border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
             button:hover { background: #333; }
             pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
-            .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
+           .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
                      border-radius: 20px; font-size: 14px; display: inline-block; }
             a { color: #0969da; text-decoration: none; }
             input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; margin: 10px 0; }
@@ -475,6 +584,7 @@ def home():
 
 # ==================== SWAGGER DOCS ====================
 @app.route('/docs')
+@limiter.exempt # CRITICAL FIX #2: Docs exempt from rate limiting
 def docs():
     """
     Interactive API documentation using Swagger UI.
@@ -497,6 +607,44 @@ def docs():
                 presets: [SwaggerUIBundle.presets.apis]
             })
         </script>
+    </body>
+    </html>
+    """
+    return html
+
+# ==================== THANK YOU PAGE ====================
+# MEDIUM FIX #9: Added /thanks endpoint for post-payment redirect
+@app.route('/thanks')
+@limiter.exempt # CRITICAL FIX #2: Static page exempt from rate limiting
+def thanks():
+    """
+    Thank you page after successful payment.
+    Prevents 404 after NowPayments redirects user back.
+    """
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Payment Successful - UA Parser API</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                   max-width: 600px; margin: 60px auto; padding: 0 20px; line-height: 1.6; text-align: center; }
+            h1 { color: #22c55e; }
+           .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+            p { color: #666; }
+            a { color: #0969da; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+        </style>
+    </head>
+    <body>
+        <h1>✓ Payment Successful!</h1>
+        <div class="card">
+            <p>Thank you for your purchase!</p>
+            <p>Your API key has been sent to your email. Check your inbox (and spam folder) in the next few minutes.</p>
+            <p>If you don't receive it within 15 minutes, <a href="mailto:mulengwa6@gmail.com">contact support</a>.</p>
+            <p><a href="/">Back to Home</a></p>
+        </div>
     </body>
     </html>
     """
