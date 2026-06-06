@@ -3,3 +3,4 @@ waitress==3.0.0
 user-agents==2.2.0
 psycopg[binary]
 requests
+flask-limiter==3.5.0
