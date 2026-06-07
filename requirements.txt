@@ -1,6 +1,8 @@
-flask==3.0.0
-waitress==3.0.0
-user-agents==2.2.0
+flask
+waitress
 psycopg[binary]
 requests
-flask-limiter==3.5.0
+python-dotenv
+flask-limiter
+user-agents
+secrets
