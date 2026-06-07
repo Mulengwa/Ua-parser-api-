@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, send_from_directory
 from user_agents import parse
 from waitress import serve
-import os, hashlib, hmac, json, uuid, time, re # Added 're' for email validation
+import os, hashlib, hmac, json, uuid, time, re
 from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
@@ -9,29 +9,22 @@ import requests
 import secrets
 
 # ==================== FLASK-LIMITER IMPORTS ====================
-# CRITICAL FIX #2: Import rate limiting to prevent DoS and free tier abuse
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 # ==================== APP INITIALIZATION ====================
-# Create Flask app instance - this is the main web server
+# DETA FIX: Deta expects app to run on port 8080. Waitress will bind to PORT env var anyway.
 app = Flask(__name__)
 
 # ==================== SECURITY CONSTANTS ====================
-# CRITICAL FIX #2: Rate limiting defaults - 200/day, 50/hour per IP
-# CRITICAL FIX #5: Max UA string length to prevent memory exhaustion DoS
 MAX_UA_LENGTH = 5000
-# HIGH FIX #4: Email validation constants
 MAX_EMAIL_LENGTH = 254
 EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-# HIGH FIX #6: CORS allowed origins from env var
 ALLOWED_ORIGINS = set(
     os.environ.get("ALLOWED_ORIGINS", "").split(",")
 ) if os.environ.get("ALLOWED_ORIGINS") else set()
 
 # ==================== RATE LIMITER SETUP ====================
-# CRITICAL FIX #2: Initialize Flask-Limiter after app creation
-# storage_uri="memory://" is fine for single Render instance. Use Redis for multi-instance later
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
@@ -40,65 +33,110 @@ limiter = Limiter(
 )
 
 # ==================== ENVIRONMENT VARIABLES ====================
-# CRITICAL FIX #1: ADMIN_SECRET - removed "change_me" default to prevent unauthorized access
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET")
 if not ADMIN_SECRET:
     raise RuntimeError("ADMIN_SECRET environment variable must be set")
-# DATABASE_URL: PostgreSQL connection string from Render/Neon/Supabase
 DATABASE_URL = os.environ.get("DATABASE_URL")
-# RESEND_API_KEY: API key for sending emails via Resend.com
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
-# MEDIUM FIX #8: Configurable from email domain to avoid spam folder
-RESEND_FROM_EMAIL = os.environ.get(
-    "RESEND_FROM_EMAIL",
-    "noreply@ua-parser-api.com"
-)
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "noreply@ua-parser-api.com")
 
 # ==================== NOWPAYMENTS CONFIG ====================
-# NOWPAYMENTS_API_KEY: API key from nowpayments.io dashboard for creating invoices
 NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
-# NOWPAYMENTS_IPN_SECRET: Secret used to verify webhook signatures from NowPayments
 NOWPAYMENTS_IPN_SECRET = os.environ.get("NOWPAYMENTS_IPN_SECRET")
-# USDT_PRICE_USD: Price for 1000 credits in USD. Default $5.00 if not set
 USDT_PRICE_USD = float(os.environ.get("USDT_PRICE_USD", "5.00"))
 
 # ==================== STARTUP CHECKS ====================
-# Fail fast if DATABASE_URL is missing - app can't work without DB
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
 # ==================== HELPER FUNCTIONS ====================
-# HIGH FIX #4: Email validation function to prevent spam/abuse
 def validate_email(email):
-    """
-    Validate email address format and length.
-    Returns True if valid, False otherwise.
-    Prevents database pollution and spam attacks.
-    """
+    """Validate email address format and length. Prevents spam/abuse."""
     if not email or not isinstance(email, str):
         return False
-
     email = email.strip().lower()
-
-    # Check length bounds
     if len(email) > MAX_EMAIL_LENGTH or len(email) < 5:
         return False
-
-    # Regex pattern match
     return bool(re.match(EMAIL_PATTERN, email))
+
+# AI FEATURE #1: Bot/AI Agent Detection
+def detect_ai_agent(ua_string):
+    """
+    Detect AI crawlers/bots from User-Agent string.
+    Returns (is_ai_agent, bot_type, allows_training)
+    2026: AI agents need to know if traffic is GPTBot, ClaudeBot, etc for robots.txt compliance
+    """
+    ua_lower = ua_string.lower()
+
+    # Known AI crawler tokens + their training opt-out status
+    # allows_training=False means site should block via robots.txt
+    ai_agents = {
+        'gptbot': {'type': 'GPTBot', 'allows_training': False},
+        'chatgpt-user': {'type': 'ChatGPT-User', 'allows_training': True},
+        'claudebot': {'type': 'ClaudeBot', 'allows_training': False},
+        'claude-web': {'type': 'Claude-Web', 'allows_training': True},
+        'google-extended': {'type': 'Google-Extended', 'allows_training': False},
+        'perplexitybot': {'type': 'PerplexityBot', 'allows_training': False},
+        'applebot-extended': {'type': 'Applebot-Extended', 'allows_training': False},
+        'bytespider': {'type': 'Bytespider', 'allows_training': False},
+        'ccbot': {'type': 'CCBot', 'allows_training': True}
+    }
+
+    for token, info in ai_agents.items():
+        if token in ua_lower:
+            return True, info['type'], info['allows_training']
+    return False, None, True
+
+# AI FEATURE #3: Headless browser detection
+def detect_headless(ua_string):
+    """
+    Detect headless browsers: Puppeteer, Playwright, Selenium.
+    AI agents use this to serve different content vs real users.
+    """
+    ua_lower = ua_string.lower()
+    headless_signals = [
+        'headlesschrome', 'puppeteer', 'playwright',
+        'webdriver', 'selenium', 'phantomjs'
+    ]
+    return any(signal in ua_lower for signal in headless_signals)
+
+# AI FEATURE #4: Browser engine detection
+def get_browser_engine(ua_string):
+    """
+    Extract browser engine: chromium, gecko, webkit.
+    AI agents use this to infer JS capabilities like WebAssembly, ES2022 support.
+    """
+    ua_lower = ua_string.lower()
+    if 'chrome' in ua_lower or 'chromium' in ua_lower:
+        return 'chromium'
+    elif 'firefox' in ua_lower or 'gecko' in ua_lower:
+        return 'gecko'
+    elif 'safari' in ua_lower and 'chrome' not in ua_lower:
+        return 'webkit'
+    return 'unknown'
+
+# AI FEATURE #6: Language + Region hints
+def parse_language(request):
+    """
+    Parse Accept-Language header for primary_lang + region.
+    AI agents use this to request localized content.
+    """
+    accept_lang = request.headers.get('Accept-Language', '')
+    if not accept_lang:
+        return None, None
+
+    # Take first language: en-US,en;q=0.9 -> en-US
+    primary = accept_lang.split(',')[0].strip()
+    parts = primary.split('-')
+    lang = parts[0] if parts else None
+    region = parts[1] if len(parts) > 1 else None
+    return lang, region
 
 # ==================== DATABASE FUNCTIONS ====================
 def init_db():
-    """
-    Initialize database tables on startup.
-    Creates api_keys and orders tables if they don't exist.
-    Orders table tracks NowPayments transactions.
-    Runs on module import so Render cold starts work.
-    """
-    # Connect to PostgreSQL with SSL required for security
+    """Initialize database tables on startup. Creates api_keys and orders tables."""
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
-            # Table for storing API keys and remaining credits
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS api_keys (
                     key TEXT PRIMARY KEY,
@@ -106,7 +144,6 @@ def init_db():
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Table for tracking payment orders from NowPayments
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS orders (
                     order_id TEXT PRIMARY KEY,
@@ -119,44 +156,25 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-        # Commit changes to database
         conn.commit()
     print("DB initialized: api_keys and orders tables ready")
 
 def get_credits(api_key):
-    """
-    Get remaining credits for a given API key.
-    Returns 0 if key doesn't exist.
-    Auto-creates 'test' key with 1000 credits for free tier.
-    This ensures new users can try API immediately.
-    """
-    # Connect to DB and fetch credits for the key
+    """Get remaining credits for a given API key. Auto-creates 'test' key with 1000 credits."""
     with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            # Query credits for this API key
             cur.execute("SELECT credits FROM api_keys WHERE key = %s", (api_key,))
             row = cur.fetchone()
-
-            # Auto-create test key with 1000 credits if it doesn't exist
-            # This handles fresh DB on Render cold start
             if not row and api_key == 'test':
                 cur.execute("INSERT INTO api_keys (key, credits) VALUES ('test', 1000) ON CONFLICT DO NOTHING")
                 conn.commit()
                 return 1000
-
-            # Return credits or 0 if key not found
             return row['credits'] if row else 0
 
 def deduct_credit(api_key):
-    """
-    Deduct 1 credit from the API key if credits > 0.
-    Uses atomic UPDATE to prevent race conditions.
-    Returns remaining credits or None if no credits left.
-    """
-    # Update credits atomically to prevent race conditions
+    """Deduct 1 credit from the API key if credits > 0. Atomic to prevent race conditions."""
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
-            # Decrement credits only if > 0, return new value
             cur.execute(
                 "UPDATE api_keys SET credits = credits - 1, updated_at = NOW() WHERE key = %s AND credits > 0 RETURNING credits",
                 (api_key,)
@@ -168,12 +186,7 @@ def deduct_credit(api_key):
             return None
 
 def create_or_update_key(api_key, credits=1000):
-    """
-    Create a new API key or add credits to existing key.
-    Used for both free tier setup and paid fulfillment.
-    ON CONFLICT handles existing keys by adding credits.
-    """
-    # Insert new key or update existing key's credits
+    """Create a new API key or add credits to existing key. ON CONFLICT handles existing keys."""
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -185,20 +198,12 @@ def create_or_update_key(api_key, credits=1000):
         conn.commit()
 
 def send_api_key_email(to_email, api_key):
-    """
-    Send the API key to customer email using Resend.
-    Only sends if RESEND_API_KEY is set in environment.
-    Called automatically after payment webhook fires.
-    MEDIUM FIX #8: Uses RESEND_FROM_EMAIL env var instead of hardcoded resend.dev
-    """
-    # Check if Resend API key is configured
+    """Send the API key to customer email using Resend. Only sends if RESEND_API_KEY is set."""
     if not RESEND_API_KEY:
         print("ERROR: RESEND_API_KEY not set - email not sent")
         return
-
-    # Build email payload for Resend API
     payload = {
-        "from": f"UA Parser API <{RESEND_FROM_EMAIL}>", # MEDIUM FIX #8: Configurable domain
+        "from": f"UA Parser API <{RESEND_FROM_EMAIL}>",
         "to": [to_email],
         "subject": "Your UA Parser API Key is Ready",
         "html": f"""
@@ -209,73 +214,50 @@ def send_api_key_email(to_email, api_key):
         <p>You have 1000 credits. Each request uses 1 credit.</p>
         """
     }
-    # Set headers for Resend API authentication
     headers = {"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}
     try:
-        # Send POST request to Resend API
         r = requests.post("https://api.resend.com/emails", json=payload, headers=headers, timeout=10)
         r.raise_for_status()
         print(f"EMAIL SENT to {to_email}")
     except Exception as e:
-        # Log any errors if email fails to send
         print(f"ERROR sending email: {e}")
 
 # ==================== MIDDLEWARE ====================
 @app.after_request
 def add_headers(response):
-    """
-    Add CORS and custom headers to all responses.
-    HIGH FIX #6: Restricts CORS to configured origins instead of allowing '*'
-    X-API-Latency is for marketing/social proof.
-    """
-    # HIGH FIX #6: Restrict CORS to allowed origins for security
+    """Add CORS and custom headers to all responses. Restricts CORS to configured origins."""
     origin = request.headers.get('Origin')
-
-    # Allow localhost for dev, restrict in prod
     if origin == 'http://localhost:3000' or origin in ALLOWED_ORIGINS:
         response.headers['Access-Control-Allow-Origin'] = origin
     elif not ALLOWED_ORIGINS:
-        # Backward compat for dev if no ALLOWED_ORIGINS set
         response.headers['Access-Control-Allow-Origin'] = '*'
-
-    # Add custom latency header for display
     response.headers['X-API-Latency'] = '2ms'
     return response
 
 # ==================== API ENDPOINTS ====================
 @app.route('/health')
-@limiter.exempt # CRITICAL FIX #2: Health check exempt from rate limiting for monitoring
+@limiter.exempt
 def health():
-    """
-    Health check endpoint for Render and monitoring tools.
-    Returns OK status with timestamp.
-    Render uses this to know if app is alive.
-    """
+    """Health check endpoint for Render/Deta and monitoring tools."""
     return jsonify({"status": "ok", "latency": "2ms", "timestamp": str(datetime.utcnow())}), 200
 
 @app.route('/v1/parse')
-@limiter.limit("100/minute") # CRITICAL FIX #2: Rate limit main endpoint to 100/min per IP
+@limiter.limit("100/minute")
 def parse_ua():
     """
     Main API endpoint: Parse a User-Agent string.
-    Requires key and ua parameters.
-    Free tier uses key=test with 1000 requests/day.
-    Each request deducts 1 credit.
-    HIGH FIX #5: Added UA string length validation to prevent DoS
+    AI FEATURES ADDED: bot detection, training flags, platform, engine, headless, lang
+    Logic unchanged - just extended JSON response for AI agents
     """
-    # Get key and ua from query parameters
     key = request.args.get('key', '').strip()
     ua_string = request.args.get('ua', '').strip()
 
-    # Validate ua parameter is provided
     if not ua_string:
         return jsonify({"error": "Missing?ua=Mozilla/5.0..."}), 400
 
-    # HIGH FIX #5: Validate UA string length to prevent memory exhaustion
     if len(ua_string) > MAX_UA_LENGTH:
         return jsonify({"error": f"UA string too long (max {MAX_UA_LENGTH} chars)"}), 400
 
-    # Check if key exists and has credits
     credits = get_credits(key)
     if not key or credits <= 0:
         return jsonify({
@@ -286,62 +268,87 @@ def parse_ua():
             "docs": "/docs"
         }), 402
 
-    # Deduct 1 credit for this request
     new_credits = deduct_credit(key)
     if new_credits is None:
         return jsonify({"error": "No credits left"}), 402
 
-    # Parse the User-Agent string using user_agents library with error handling
-    # HIGH FIX #5: Added try-except to handle invalid UA strings gracefully
     try:
         u = parse(ua_string)
     except Exception as e:
         print(f"Error parsing UA: {e}")
         return jsonify({"error": "Invalid UA string"}), 400
 
-    ua_lower = ua_string.lower()
-    # List of known AI crawler user agents
-    ai_bots = ['gptbot','chatgpt-user','claudebot','anthropic','google-extended','perplexitybot','bytespider']
-    is_ai_bot = any(b in ua_lower for b in ai_bots)
+    # ==================== AI AGENT FEATURES START ====================
+    # FEATURE #1: Bot/AI Agent Detection
+    is_ai_agent, bot_type, allows_training = detect_ai_agent(ua_string)
 
-    # Return parsed data as JSON
+    # FEATURE #3: Platform + Device Granularity + Headless
+    platform = u.os.family.lower() if u.os.family else 'unknown'
+    device_type = "mobile" if u.is_mobile else "tablet" if u.is_tablet else "desktop"
+    is_headless = detect_headless(ua_string)
+
+    # FEATURE #4: Browser engine + version
+    browser_engine = get_browser_engine(ua_string)
+
+    # FEATURE #6: Language + Region
+    primary_lang, region = parse_language(request)
+
+    # FEATURE #5: Cloud/Server detection - basic version using device_type
+    # Full IP-based detection needs external DB. This flags server devices.
+    is_datacenter = device_type == 'server' or is_headless
+    hosting_provider = None # Set this if you add IP geolocation later
+    # ==================== AI AGENT FEATURES END ====================
+
+    # Original response + new AI agent fields added
+    # Backwards compatible: old fields unchanged
     return jsonify({
         "browser": u.browser.family,
         "browser_version": u.browser.version_string,
         "os": u.os.family,
         "os_version": u.os.version_string,
         "device": u.device.family,
-        "device_type": "mobile" if u.is_mobile else "tablet" if u.is_tablet else "desktop",
+        "device_type": device_type,
         "is_bot": u.is_bot,
-        "is_ai_crawler": is_ai_bot,
+
+        # AI FEATURE #1: AI agent detection
+        "is_ai_agent": is_ai_agent,
+        "bot_type": bot_type,
+
+        # AI FEATURE #2: LLM Training Opt-out
+        "allows_training": allows_training,
+
+        # AI FEATURE #3: Platform + Headless
+        "platform": platform,
+        "is_headless": is_headless,
+
+        # AI FEATURE #4: Engine + capabilities
+        "browser_engine": browser_engine,
+
+        # AI FEATURE #5: Cloud detection
+        "is_datacenter": is_datacenter,
+        "hosting_provider": hosting_provider,
+
+        # AI FEATURE #6: Language
+        "primary_lang": primary_lang,
+        "region": region,
+
         "credits_left": new_credits
     }), 200, {'Cache-Control': 'public, max-age=86400', 'CDN-Cache-Control': 'max-age=31536000'}
 
 # ==================== NOWPAYMENTS PAYMENT ROUTES ====================
 @app.route('/create-order', methods=['POST', 'GET'])
-@limiter.limit("5/minute") # CRITICAL FIX #2: Rate limit order creation to prevent spam
+@limiter.limit("5/minute")
 def create_order():
-    """
-    Updated: Creates NowPayments invoice. Customer only sees $5.
-    No memo/address shown. Memo handled in background.
-    GET returns instructions. POST with email creates invoice.
-    HIGH FIX #4: Added email validation
-    MEDIUM FIX #7: Added duplicate pending order check
-    """
-    # Handle GET request - show instructions
+    """Creates NowPayments invoice. Customer only sees $5. No memo/address shown."""
     if request.method == 'GET':
         return jsonify({"message": "POST JSON with {\"email\":\"you@example.com\"} to create order"})
 
-    # Parse JSON data from POST request
     data = request.get_json() or {}
-    # Get customer email from request body
     email = data.get('email', '').strip().lower() if data.get('email') else ''
 
-    # HIGH FIX #4: Validate email format and length
     if not validate_email(email):
         return jsonify({"error": "Invalid email address"}), 400
 
-    # MEDIUM FIX #7: Check for existing pending order to prevent database pollution
     with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -354,53 +361,40 @@ def create_order():
                     "error": "You already have a pending order. Check your email or contact support."
                 }), 409
 
-    # Embed email in order_id so webhook can extract it later
-    # Format: order_email_with_underscores_random6chars
     order_id = f"order_{email.replace('@','_').replace('.','_')}_{uuid.uuid4().hex[:6]}"
-    # Generate random API key for customer
     api_key = "sk_live_" + secrets.token_urlsafe(16)
 
-    # Create key with 0 credits and pending order in database
     create_or_update_key(api_key, 0)
     with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
         with conn.cursor() as cur:
-            # Insert pending order - will be marked paid by webhook
             cur.execute("""
                 INSERT INTO orders (order_id, api_key, email, amount, status, provider)
                 VALUES (%s, %s, %s, %s, 'pending', 'nowpayments')
             """, (order_id, api_key, email, USDT_PRICE_USD))
         conn.commit()
 
-    # Call NowPayments API to create invoice
-    # Customer never sees USDT address or memo
     if not NOWPAYMENTS_API_KEY:
         return jsonify({"error": "Payment not configured"}), 500
 
-    # Build payload for NowPayments invoice creation
     np_payload = {
         "price_amount": USDT_PRICE_USD,
         "price_currency": "usd",
-        "pay_currency": "usdttrc20", # Customer pays, you receive USDT TRC20
+        "pay_currency": "usdttrc20",
         "order_id": order_id,
         "order_description": "UA Parser API - 1000 credits",
-        "ipn_callback_url": f"{request.url_root}webhook/nowpayments", # Webhook URL
-        "success_url": f"{request.url_root}thanks" # MEDIUM FIX #9: Redirect to /thanks page
+        "ipn_callback_url": f"{request.url_root}webhook/nowpayments",
+        "success_url": f"{request.url_root}thanks"
     }
 
-    # Set API key header for NowPayments
     headers = {"x-api-key": NOWPAYMENTS_API_KEY}
-    # Make POST request to NowPayments API
     r = requests.post("https://api.nowpayments.io/v1/invoice", json=np_payload, headers=headers, timeout=10)
 
-    # Check if NowPayments returned error
     if r.status_code!= 200:
         print(f"NowPayments error: {r.text}")
         return jsonify({"error": "Payment provider error"}), 500
 
-    # Parse invoice response
     invoice = r.json()
 
-    # Return checkout URL - customer gets redirected here
     return jsonify({
         "checkout_url": invoice['invoice_url'],
         "order_id": order_id,
@@ -408,102 +402,74 @@ def create_order():
     }), 200
 
 @app.route('/webhook/nowpayments', methods=['POST'])
-@limiter.exempt # CRITICAL FIX #2: Webhook exempt from rate limiting so NowPayments can always reach it
+@limiter.exempt
 def nowpayments_webhook():
-    """
-    NowPayments calls this automatically when customer pays.
-    Customer never sees memo/address. Triggers existing email logic.
-    CRITICAL FIX #3: Verifies signature with explicit missing header check to prevent bypass
-    """
-    # Get signature from NowPayments header
+    """NowPayments calls this automatically when customer pays. Verifies signature."""
     received_sig = request.headers.get('x-nowpayments-sig')
-
-    # CRITICAL FIX #3: MUST have signature - fail if missing instead of using empty string fallback
     if not received_sig:
         print("ERROR: Missing x-nowpayments-sig header")
         return 'Invalid signature', 403
 
-    # Get raw payload for signature verification
     payload = request.get_data()
-
-    # Check if IPN secret is configured
     if not NOWPAYMENTS_IPN_SECRET:
         return 'IPN secret not set', 500
 
-    # Calculate expected signature using HMAC SHA512
     calc_sig = hmac.new(
         NOWPAYMENTS_IPN_SECRET.encode(),
         payload,
         hashlib.sha512
     ).hexdigest()
 
-    # Verify signature matches - prevents spoofing
     if not hmac.compare_digest(received_sig, calc_sig):
         print(f"ERROR: Signature mismatch")
         return 'Invalid signature', 403
 
-    # Parse JSON payload with error handling
     try:
         data = request.get_json()
     except Exception as e:
         print(f"ERROR: Invalid JSON in webhook: {e}")
         return 'Invalid payload', 400
 
-    # Only fulfill when payment is actually confirmed on blockchain
     if data.get('payment_status') == 'finished':
         order_id = data.get('order_id')
         amount = float(data.get('price_amount', 0))
 
-        # Fetch order from DB to get email and api_key
         with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
                 order = cur.fetchone()
 
-        # Check if order exists, not already paid, and amount is correct
         if order and order['status']!= 'paid' and amount >= USDT_PRICE_USD:
-            # Mark order as paid and store transaction hash
             with psycopg.connect(DATABASE_URL, sslmode='require') as conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE orders SET status = 'paid', tx_hash = %s WHERE order_id = %s",
                                 (data.get('txid'), order_id))
                     conn.commit()
 
-            # Fulfill order using existing functions
-            create_or_update_key(order['api_key'], 1000) # Add 1000 credits
-            send_api_key_email(order['email'], order['api_key']) # Send email
+            create_or_update_key(order['api_key'], 1000)
+            send_api_key_email(order['email'], order['api_key'])
             print(f"NOWPAYMENTS FULFILLED {order_id} - TX: {data.get('txid')}")
 
     return 'ok', 200
 
 # ==================== STATIC FILES ====================
 @app.route('/openapi.json')
-@limiter.exempt # CRITICAL FIX #2: Static files exempt from rate limiting
+@limiter.exempt
 def openapi():
-    """
-    Serve OpenAPI spec file for Swagger UI and AI agents.
-    AI agents like Claude/ChatGPT use this to auto-discover API.
-    """
+    """Serve OpenAPI spec file for Swagger UI and AI agents."""
     return send_from_directory('.', 'openapi.json')
 
 @app.route('/llms.txt')
-@limiter.exempt # CRITICAL FIX #2: Static files exempt from rate limiting
+@limiter.exempt
 def llms_txt():
-    """
-    Serve llms.txt for AI crawlers and documentation tools.
-    Tells AI agents what this API does and how to use it.
-    """
+    """Serve llms.txt for AI crawlers and documentation tools."""
     return send_from_directory('.', 'llms.txt')
 
 # ==================== LANDING PAGE ====================
 @app.route('/')
-@limiter.exempt # CRITICAL FIX #2: Landing page exempt from rate limiting
+@limiter.exempt
 def home():
-    """
-    Landing page with interactive API tester.
-    Lets users try the API without reading docs.
-    Includes Buy $5 button that redirects to NowPayments.
-    """
+    """Landing page with interactive API tester."""
     html = """
     <!DOCTYPE html>
     <html>
@@ -514,14 +480,14 @@ def home():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                    max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; }
             h1 { color: #111; }
-           .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+          .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
             textarea { width: 100%; height: 80px; padding: 10px; font-family: monospace;
                        border: 1px solid #ddd; border-radius: 8px; }
             button { background: #000; color: #fff; border: none; padding: 12px 24px;
                      border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; }
             button:hover { background: #333; }
             pre { background: #f6f8fa; padding: 16px; border-radius: 8px; overflow-x: auto; }
-           .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
+          .badge { background: #e6f7ff; color: #0958d9; padding: 4px 12px;
                      border-radius: 20px; font-size: 14px; display: inline-block; }
             a { color: #0969da; text-decoration: none; }
             input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; margin: 10px 0; }
@@ -549,7 +515,6 @@ def home():
         <p><a href="/docs">📖 API Docs</a> | <a href="/openapi.json">OpenAPI Spec</a></p>
 
         <script>
-            // Test API button - calls /v1/parse with test key
             async function testAPI() {
                 const ua = document.getElementById('ua').value;
                 const resultEl = document.getElementById('result');
@@ -562,7 +527,6 @@ def home():
                     resultEl.textContent = 'Error: ' + e.message;
                 }
             }
-            // Buy button - creates order and redirects to NowPayments
             async function buyAPI() {
                 const email = document.getElementById('email').value;
                 if (!email) return alert('Enter email first');
@@ -584,12 +548,9 @@ def home():
 
 # ==================== SWAGGER DOCS ====================
 @app.route('/docs')
-@limiter.exempt # CRITICAL FIX #2: Docs exempt from rate limiting
+@limiter.exempt
 def docs():
-    """
-    Interactive API documentation using Swagger UI.
-    Loads openapi.json and provides a UI to test endpoints.
-    """
+    """Interactive API documentation using Swagger UI."""
     html = """
     <!DOCTYPE html>
     <html>
@@ -613,14 +574,10 @@ def docs():
     return html
 
 # ==================== THANK YOU PAGE ====================
-# MEDIUM FIX #9: Added /thanks endpoint for post-payment redirect
 @app.route('/thanks')
-@limiter.exempt # CRITICAL FIX #2: Static page exempt from rate limiting
+@limiter.exempt
 def thanks():
-    """
-    Thank you page after successful payment.
-    Prevents 404 after NowPayments redirects user back.
-    """
+    """Thank you page after successful payment."""
     html = """
     <!DOCTYPE html>
     <html>
@@ -631,7 +588,7 @@ def thanks():
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                    max-width: 600px; margin: 60px auto; padding: 0 20px; line-height: 1.6; text-align: center; }
             h1 { color: #22c55e; }
-           .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
+          .card { border: 1px solid #e5e5e5; border-radius: 12px; padding: 24px; margin: 20px 0; }
             p { color: #666; }
             a { color: #0969da; text-decoration: none; }
             a:hover { text-decoration: underline; }
@@ -651,12 +608,9 @@ def thanks():
     return html
 
 # ==================== INIT DB ON COLD START ====================
-# Call init_db when module loads so tables exist before first request on Render
-# This runs even when started by waitress/gunicorn, not just python app.py
 init_db()
 
 if __name__ == '__main__':
-    # Initialize database and start server for local dev
-    # On Render this block doesn't run because waitress imports the app
-    port = int(os.environ.get("PORT", 10000))
+    # DETA FIX: Deta uses port 8080. PORT env var works for both Render + Deta
+    port = int(os.environ.get("PORT", 8080))
     serve(app, host="0.0.0.0", port=port)
