@@ -97,8 +97,8 @@ def init_db():
             cur.execute("CREATE TABLE IF NOT EXISTS api_keys (key TEXT PRIMARY KEY, credits INT NOT NULL DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
             cur.execute("CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, api_key TEXT, email TEXT, provider TEXT DEFAULT 'nowpayments', amount NUMERIC, status TEXT DEFAULT 'pending', tx_hash TEXT, idempotency_key TEXT UNIQUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         conn.commit()
-    print("DB initialized: api_keys and orders tables ready")
-    def get_credits(api_key):
+    print("DB initialized: api_keys and orders tables ready")  
+def get_credits(api_key):
     with psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row, connect_timeout=5) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT credits FROM api_keys WHERE key = %s", (api_key,))
