@@ -379,7 +379,7 @@ def create_order():
     # OPTION 1: Auto-cancel expired pending orders older than 20 minutes
     # This runs every time user clicks "Buy $5". If old invoice expired on NowPayments, 
     # we mark it 'expired' in DB so user can create new order immediately
-    with psycopg.connect(DATABASE_URL, sslmode='require', connect_timeout=5) as conn: # PATCH: Add timeout
+        with psycopg.connect(DATABASE_URL, sslmode='require', connect_timeout=5) as conn: # PATCH: Add timeout
 # ==================== THANK YOU PAGE ====================
 @app.route('/thanks')
 @limiter.exempt # Don't rate limit thank you page
