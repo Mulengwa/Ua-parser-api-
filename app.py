@@ -18,7 +18,8 @@ app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024
 MAX_UA_LENGTH = 5000
 MAX_EMAIL_LENGTH = 254
 EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-API_KEY_PATTERN = re.compile(r'^(sk_live_|test)[a-zA-Z0-9_\-]{16,}$')
+# FIXED: Allows exactly 'test' OR 'sk_live_' followed by 16+ characters
+API_KEY_PATTERN = re.compile(r'^(sk_live_[a-zA-Z0-9_\-]{16,}|test)$')
 ALLOWED_ORIGINS = set(os.environ.get("ALLOWED_ORIGINS", "").split(",")) if os.environ.get("ALLOWED_ORIGINS") else set()
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:10000")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", BASE_URL)
