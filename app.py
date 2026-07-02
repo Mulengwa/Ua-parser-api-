@@ -18,7 +18,6 @@ app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024
 MAX_UA_LENGTH = 5000
 MAX_EMAIL_LENGTH = 254
 EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-# FIXED: Allows exactly 'test' OR 'sk_live_' followed by 16+ characters
 API_KEY_PATTERN = re.compile(r'^(sk_live_[a-zA-Z0-9_\-]{16,}|test)$')
 ALLOWED_ORIGINS = set(os.environ.get("ALLOWED_ORIGINS", "").split(",")) if os.environ.get("ALLOWED_ORIGINS") else set()
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:10000")
@@ -208,8 +207,18 @@ def create_order():
         
     if not NOWPAYMENTS_API_KEY: return jsonify({"error": "Payment not configured"}), 500
     
-    np_payload = {"price_amount": USDT_PRICE_USD, "price_currency": "usd", "pay_currency": "usdttrc20", "order_id": order_id, "order_description": "UA Parser API - 1000 credits", "ipn_callback_url": f"{WEBHOOK_URL}/webhook/nowpayments", "success_url": f"{BASE_URL}/thanks", "cancel_url": f"{BASE_URL}/", "is_fixed_rate": True, "is_fee_paid_by_user": False}
-    headers = {"x-api-key": NOWPAYMENTS_API_KEY}
+    # FIXED: Added customer_email parameter directly to pre-fill the checkout page seamlessly
+    np_payload = {
+        "price_amount": USDT_PRICE_USD, 
+        "price_currency": "usd", 
+        "order_id": order_id, 
+        "order_description": "UA Parser API - 1000 credits", 
+        "customer_email": email,
+        "ipn_callback_url": f"{WEBHOOK_URL}/webhook/nowpayments", 
+        "success_url": f"{BASE_URL}/thanks", 
+        "cancel_url": f"{BASE_URL}/"
+    }
+    headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
     r = requests.post("https://api.nowpayments.io/v1/invoice", json=np_payload, headers=headers, timeout=10)
     if r.status_code != 200: print(f"NowPayments error: {r.text}"); return jsonify({"error": "Payment provider error"}), 500
     
