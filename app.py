@@ -15,18 +15,27 @@ from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024
+
 MAX_UA_LENGTH = 5000
 MAX_EMAIL_LENGTH = 254
 EMAIL_PATTERN = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 API_KEY_PATTERN = re.compile(r'^(sk_live_[a-zA-Z0-9_\-]{16,}|test)$')
+
 ALLOWED_ORIGINS = set(os.environ.get("ALLOWED_ORIGINS", "").split(",")) if os.environ.get("ALLOWED_ORIGINS") else set()
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:10000")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", BASE_URL)
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
 if 'localhost' in BASE_URL and ENVIRONMENT == 'production': 
     raise RuntimeError("Cannot use localhost URLs in production")
 
-limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["200 per day", "50 per hour"], storage_uri="memory://")
+limiter = Limiter(
+    app=app, 
+    key_func=get_remote_address, 
+    default_limits=["200 per day", "50 per hour"], 
+    storage_uri="memory://"
+)
+
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET")
 if not ADMIN_SECRET: 
     raise RuntimeError("ADMIN_SECRET environment variable must be set")
@@ -37,7 +46,13 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL: 
     raise RuntimeError("DATABASE_URL not set")
 
-pool = ConnectionPool(conninfo=DATABASE_URL, kwargs={"sslmode": "require", "connect_timeout": 5}, min_size=1, max_size=20, open=True)
+pool = ConnectionPool(
+    conninfo=DATABASE_URL, 
+    kwargs={"sslmode": "require", "connect_timeout": 5}, 
+    min_size=1, 
+    max_size=20, 
+    open=True
+)
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "noreply@ua-parser-api.com")
@@ -45,13 +60,6 @@ SUPPORT_EMAIL = os.environ.get("SUPPORT_EMAIL", "mulengwa6@gmail.com")
 NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
 NOWPAYMENTS_IPN_SECRET = os.environ.get("NOWPAYMENTS_IPN_SECRET")
 USDT_PRICE_USD = float(os.environ.get("USDT_PRICE_USD", "5.00"))
-
-# Raw HTML Templates to avoid multi-line formatting issues
-HOME_HTML = """<!DOCTYPE html><html><head><title>UA Parser API</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:700px;margin:40px auto;padding:0 20px;line-height:1.6}h1{color:#111}.card{border:1px solid #e5e5e5;border-radius:12px;padding:24px;margin:20px 0}textarea{width:100%;height:80px;padding:10px;font-family:monospace;border:1px solid #ddd;border-radius:8px}button{background:#000;color:#fff;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-size:16px;margin-top:10px}button:hover{background:#333}pre{background:#f6f8fa;padding:16px;border-radius:8px;overflow-x:auto}.badge{background:#e6f7ff;color:#0958d9;padding:4px 12px;border-radius:20px;font-size:14px;display:inline-block}a{color:#0969da;text-decoration:none}input{width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;margin:10px 0}</style></head><body><h1>UA Parser for Humans + AI Agents</h1><p class="badge">1000 free requests/day with key=test</p><p>Fast, accurate User-Agent parsing. 2ms avg latency. No signup needed to test.</p><div class="card"><h3>Try it now</h3><textarea id="ua" placeholder="Paste User-Agent here...">Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36</textarea><button onclick="testAPI()">Run Test</button><pre id="result">Result will appear here...</pre></div><div class="card"><h3>Ready to go beyond free?</h3><p>$5 for 1000 requests. Card or crypto. No memo needed.</p><input id="email" type="email" placeholder="Enter your email"><button onclick="buyAPI()">Buy $5</button></div><p><a href="/docs">📖 API Docs</a> | <a href="/openapi.json">OpenAPI Spec</a></p><script>async function testAPI(){const ua=document.getElementById('ua').value;const resultEl=document.getElementById('result');resultEl.textContent='Loading...';try{const res=await fetch(`/v1/parse?key=test&ua=${encodeURIComponent(ua)}`);const data=await res.json();resultEl.textContent=JSON.stringify(data,null,2)}catch(e){resultEl.textContent='Error: '+e.message}}async function buyAPI(){const email=document.getElementById('email').value;if(!email)return alert('Enter email first');const res=await fetch('/create-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});const data=await res.json();console.log('NowPayments response:',data);if(data.checkout_url)window.open(data.checkout_url,'_self');else alert(data.error||'Error: '+JSON.stringify(data))}</script></body></html>"""
-
-DOCS_HTML = """<!DOCTYPE html><html><head><title>UA Parser API Docs</title><link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"></head><body><div id="swagger-ui"></div><script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script><script>SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui',presets:[SwaggerUIBundle.presets.apis]})</script></body></html>"""
-
-THANKS_HTML = """<!DOCTYPE html><html><head><title>Payment Successful - UA Parser API</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:600px;margin:60px auto;padding:0 20px;line-height:1.6;text-align:center}h1{color:#22c55e}.card{border:1px solid #e5e5e5;border-radius:12px;padding:24px;margin:20px 0}p{color:#666}a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><h1>✓ Payment Successful!</h1><div class="card"><p>Thank you for your purchase!</p><p>Your API key has been sent to your email. Check your inbox (and spam folder) in the next few minutes.</p><p>If you don't receive it within 15 minutes, <a href="mailto:SUPPORT_EMAIL_PLACEHOLDER">contact support</a>.</p><p><a href="/">Back to Home</a></p></div></body></html>"""
 
 @contextmanager
 def get_db_cursor(row_factory=None):
@@ -61,9 +69,11 @@ def get_db_cursor(row_factory=None):
         conn.commit()
 
 def validate_email(email):
-    if not email or not isinstance(email, str): return False
+    if not email or not isinstance(email, str): 
+        return False
     email = email.strip().lower()
-    if len(email) > MAX_EMAIL_LENGTH or len(email) < 5: return False
+    if len(email) > MAX_EMAIL_LENGTH or len(email) < 5: 
+        return False
     return bool(re.match(EMAIL_PATTERN, email))
 
 def validate_api_key_format(key):
@@ -78,4 +88,72 @@ def detect_ai_agent(ua_string):
         'claude-web': {'type': 'Claude-Web', 'allows_training': True},
         'google-extended': {'type': 'Google-Extended', 'allows_training': False},
         'perplexitybot': {'type': 'PerplexityBot', 'allows_training': False},
-        'applebot-extended': {'type': 'Applebot-Extended', '
+        'applebot-extended': {'type': 'Applebot-Extended', 'allows_training': False},
+        'bytespider': {'type': 'Bytespider', 'allows_training': False},
+        'ccbot': {'type': 'CCBot', 'allows_training': True}
+    }
+    for token, info in ai_agents.items():
+        if token in ua_lower: 
+            return True, info['type'], info['allows_training']
+    return False, None, True
+
+def detect_headless(ua_string):
+    ua_lower = ua_string.lower()
+    headless_signals = ['headlesschrome', 'puppeteer', 'playwright', 'webdriver', 'selenium', 'phantomjs']
+    return any(signal in ua_lower for signal in headless_signals)
+
+def get_browser_engine(ua_string):
+    ua_lower = ua_string.lower()
+    if 'chrome' in ua_lower or 'chromium' in ua_lower: 
+        return 'chromium'
+    elif 'firefox' in ua_lower or 'gecko' in ua_lower: 
+        return 'gecko'
+    elif 'safari' in ua_lower and 'chrome' not in ua_lower: 
+        return 'webkit'
+    return 'unknown'
+
+def parse_language(request):
+    accept_lang = request.headers.get('Accept-Language', '')
+    if not accept_lang: 
+        return None, None
+    primary = accept_lang.split(',')[0].strip()
+    parts = primary.split('-')
+    lang = parts[0] if parts else None
+    region = parts[1] if len(parts) > 1 else None
+    return lang, region
+
+def init_db():
+    with get_db_cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS api_keys (key TEXT PRIMARY KEY, credits INT NOT NULL DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        cur.execute("CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, api_key TEXT, email TEXT, provider TEXT DEFAULT 'nowpayments', amount NUMERIC, status TEXT DEFAULT 'pending', tx_hash TEXT, idempotency_key TEXT UNIQUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_email_status ON orders(email, status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_idempotency_status ON orders(idempotency_key, status)")
+
+def deduct_credit(api_key):
+    if api_key == 'test':
+        with get_db_cursor() as cur:
+            cur.execute("INSERT INTO api_keys (key, credits) VALUES ('test', 1000) ON CONFLICT DO NOTHING")
+            
+    with get_db_cursor() as cur:
+        cur.execute("UPDATE api_keys SET credits = credits - 1, updated_at = NOW() WHERE key = %s AND credits > 0 RETURNING credits", (api_key,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def create_or_update_key(api_key, credits=1000):
+    with get_db_cursor() as cur:
+        cur.execute("INSERT INTO api_keys (key, credits, updated_at) VALUES (%s, %s, NOW()) ON CONFLICT (key) DO UPDATE SET credits = api_keys.credits + %s, updated_at = NOW()", (api_key, credits, credits))
+
+def send_api_key_email(to_email, api_key):
+    if not RESEND_API_KEY: 
+        print("ERROR: RESEND_API_KEY not set")
+        return
+    payload = {
+        "from": f"UA Parser API <{RESEND_FROM_EMAIL}>", 
+        "to": [to_email], 
+        "subject": "Your UA Parser API Key is Ready", 
+        "html": f"<h2>Thanks for your purchase!</h2><p>Your API key is ready:</p><pre>{escape(api_key)}</pre><p>Use: curl -H \"X-API-Key: {escape(api_key)}\" {BASE_URL}/v1/parse?ua=...</p>"
+    }
+    headers = {"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}
+    try:
+        r = requests.post("https://api.resend.com/emails", json=payload, headers=headers, timeout=10)
+        r.raise
