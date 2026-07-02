@@ -1,6 +1,6 @@
 flask==3.0.0
 waitress==3.0.0
 user-agents==2.2.0
-psycopg[binary]
+psycopg[binary,pool]
 requests
 flask-limiter==3.5.0
