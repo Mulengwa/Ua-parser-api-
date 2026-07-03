@@ -244,14 +244,13 @@ def create_order():
     if not NOWPAYMENTS_API_KEY: 
         return jsonify({"error": "Payment not configured"}), 500
     
-    # FIXED: Added pay_currency to lock onto Tron network, along with system flags to avoid step choices and rounding minimums
+    # FIXED: Removed 'customer_email' from payload to resolve the NOWPayments frontend status 400 input error conflict
     np_payload = {
         "price_amount": USDT_PRICE_USD, 
         "price_currency": "usd", 
         "pay_currency": "usdttrc20",
         "order_id": order_id, 
         "order_description": "UA Parser API - 1000 credits", 
-        "customer_email": email,
         "is_fixed_rate": True,
         "is_fee_paid_by_user": False,
         "ipn_callback_url": f"{WEBHOOK_URL}/webhook/nowpayments", 
