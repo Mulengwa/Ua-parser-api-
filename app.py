@@ -1,7 +1,3 @@
-The missing configuration parameters in the payment payload caused both problems. When we updated the payload in the previous step, the specific parameters that locked the invoice to **USDT on Tron** (pay_currency, is_fixed_rate) were accidentally stripped out.
-Because they were missing, NOWPayments generated a generic multi-asset invoice. This forced the user to choose their cryptocurrency, and the automatic conversion math tripped a "less than minimal" error on their platform.
-Here is the code with the payment payload corrected to force **USDT on Tron** directly and ensure the pricing values don't fall below platform minimums.
-```python
 from flask import Flask, request, jsonify, send_from_directory
 from user_agents import parse
 from waitress import serve
@@ -352,5 +348,3 @@ init_db()
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     serve(app, host="0.0.0.0", port=port)
-
-```
