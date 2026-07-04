@@ -12,6 +12,11 @@ import secrets
 from html import escape
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024
@@ -26,31 +31,32 @@ BASE_URL = os.environ.get("BASE_URL", "http://localhost:10000")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", BASE_URL)
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 
-if 'localhost' in BASE_URL and ENVIRONMENT == 'production': 
+if 'localhost' in BASE_URL and ENVIRONMENT == 'production':
     raise RuntimeError("Cannot use localhost URLs in production")
 
 limiter = Limiter(
-    app=app, 
-    key_func=get_remote_address, 
-    default_limits=["200 per day", "50 per hour"], 
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
     storage_uri="memory://"
 )
 
+# Critical startup validation
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET")
-if not ADMIN_SECRET: 
+if not ADMIN_SECRET:
     raise RuntimeError("ADMIN_SECRET environment variable must be set")
-if len(ADMIN_SECRET) < 32: 
+if len(ADMIN_SECRET) < 32 and ENVIRONMENT == 'production':
     raise RuntimeError("ADMIN_SECRET must be 32+ characters for production")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL: 
+if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
 pool = ConnectionPool(
-    conninfo=DATABASE_URL, 
-    kwargs={"sslmode": "require", "connect_timeout": 5}, 
-    min_size=1, 
-    max_size=20, 
+    conninfo=DATABASE_URL,
+    kwargs={"sslmode": "require", "connect_timeout": 5},
+    min_size=1,
+    max_size=20,
     open=True
 )
 
@@ -61,18 +67,25 @@ NOWPAYMENTS_API_KEY = os.environ.get("NOWPAYMENTS_API_KEY")
 NOWPAYMENTS_IPN_SECRET = os.environ.get("NOWPAYMENTS_IPN_SECRET")
 USDT_PRICE_USD = float(os.environ.get("USDT_PRICE_USD", "5.00"))
 
+# NowPayments IP prefixes (update from official docs when needed)
+NOWPAYMENTS_IP_PREFIXES = ["185.71.138.", "185.71.139."]
+
 @contextmanager
 def get_db_cursor(row_factory=None):
-    with pool.connection() as conn:
-        with conn.cursor(row_factory=row_factory) as cur:
-            yield cur
-        conn.commit()
+    try:
+        with pool.connection() as conn:
+            with conn.cursor(row_factory=row_factory) as cur:
+                yield cur
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        raise
 
 def validate_email(email):
-    if not email or not isinstance(email, str): 
+    if not email or not isinstance(email, str):
         return False
     email = email.strip().lower()
-    if len(email) > MAX_EMAIL_LENGTH or len(email) < 5: 
+    if len(email) > MAX_EMAIL_LENGTH or len(email) < 5:
         return False
     return bool(re.match(EMAIL_PATTERN, email))
 
@@ -93,7 +106,7 @@ def detect_ai_agent(ua_string):
         'ccbot': {'type': 'CCBot', 'allows_training': True}
     }
     for token, info in ai_agents.items():
-        if token in ua_lower: 
+        if token in ua_lower:
             return True, info['type'], info['allows_training']
     return False, None, True
 
@@ -104,17 +117,17 @@ def detect_headless(ua_string):
 
 def get_browser_engine(ua_string):
     ua_lower = ua_string.lower()
-    if 'chrome' in ua_lower or 'chromium' in ua_lower: 
+    if 'chrome' in ua_lower or 'chromium' in ua_lower:
         return 'chromium'
-    elif 'firefox' in ua_lower or 'gecko' in ua_lower: 
+    elif 'firefox' in ua_lower or 'gecko' in ua_lower:
         return 'gecko'
-    elif 'safari' in ua_lower and 'chrome' not in ua_lower: 
+    elif 'safari' in ua_lower and 'chrome' not in ua_lower:
         return 'webkit'
     return 'unknown'
 
 def parse_language(request):
     accept_lang = request.headers.get('Accept-Language', '')
-    if not accept_lang: 
+    if not accept_lang:
         return None, None
     primary = accept_lang.split(',')[0].strip()
     parts = primary.split('-')
@@ -124,8 +137,26 @@ def parse_language(request):
 
 def init_db():
     with get_db_cursor() as cur:
-        cur.execute("CREATE TABLE IF NOT EXISTS api_keys (key TEXT PRIMARY KEY, credits INT NOT NULL DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-        cur.execute("CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, api_key TEXT, email TEXT, provider TEXT DEFAULT 'nowpayments', amount NUMERIC, status TEXT DEFAULT 'pending', tx_hash TEXT, idempotency_key TEXT UNIQUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                key TEXT PRIMARY KEY, 
+                credits INT NOT NULL DEFAULT 0, 
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                order_id TEXT PRIMARY KEY, 
+                api_key TEXT, 
+                email TEXT, 
+                provider TEXT DEFAULT 'nowpayments', 
+                amount NUMERIC, 
+                status TEXT DEFAULT 'pending', 
+                tx_hash TEXT, 
+                idempotency_key TEXT UNIQUE, 
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_email_status ON orders(email, status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_idempotency_status ON orders(idempotency_key, status)")
 
@@ -135,31 +166,41 @@ def deduct_credit(api_key):
             cur.execute("INSERT INTO api_keys (key, credits) VALUES ('test', 1000) ON CONFLICT DO NOTHING")
             
     with get_db_cursor() as cur:
-        cur.execute("UPDATE api_keys SET credits = credits - 1, updated_at = NOW() WHERE key = %s AND credits > 0 RETURNING credits", (api_key,))
+        cur.execute("""
+            UPDATE api_keys 
+            SET credits = credits - 1, updated_at = NOW() 
+            WHERE key = %s AND credits > 0 
+            RETURNING credits
+        """, (api_key,))
         row = cur.fetchone()
         return row[0] if row else None
 
 def create_or_update_key(api_key, credits=1000):
     with get_db_cursor() as cur:
-        cur.execute("INSERT INTO api_keys (key, credits, updated_at) VALUES (%s, %s, NOW()) ON CONFLICT (key) DO UPDATE SET credits = api_keys.credits + %s, updated_at = NOW()", (api_key, credits, credits))
+        cur.execute("""
+            INSERT INTO api_keys (key, credits, updated_at) 
+            VALUES (%s, %s, NOW()) 
+            ON CONFLICT (key) DO UPDATE 
+            SET credits = api_keys.credits + %s, updated_at = NOW()
+        """, (api_key, credits, credits))
 
 def send_api_key_email(to_email, api_key):
-    if not RESEND_API_KEY: 
-        print("ERROR: RESEND_API_KEY not set")
+    if not RESEND_API_KEY:
+        logger.error("RESEND_API_KEY not set")
         return
     payload = {
-        "from": f"UA Parser API <{RESEND_FROM_EMAIL}>", 
-        "to": [to_email], 
-        "subject": "Your UA Parser API Key is Ready", 
+        "from": f"UA Parser API <{RESEND_FROM_EMAIL}>",
+        "to": [to_email],
+        "subject": "Your UA Parser API Key is Ready",
         "html": f"<h2>Thanks for your purchase!</h2><p>Your API key is ready:</p><pre>{escape(api_key)}</pre><p>Use: curl -H \"X-API-Key: {escape(api_key)}\" {BASE_URL}/v1/parse?ua=...</p>"
     }
     headers = {"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}
     try:
         r = requests.post("https://api.resend.com/emails", json=payload, headers=headers, timeout=10)
         r.raise_for_status()
-        print(f"EMAIL SENT to {to_email}")
+        logger.info(f"EMAIL SENT to {to_email}")
     except Exception as e:
-        print(f"ERROR sending email: {e}")
+        logger.error(f"ERROR sending email: {e}")
 
 @app.after_request
 def add_headers(response):
@@ -171,14 +212,14 @@ def add_headers(response):
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     origin = request.headers.get('Origin')
     allowed = ALLOWED_ORIGINS | {'http://localhost:3000'}
-    if origin in allowed: 
+    if origin in allowed:
         response.headers['Access-Control-Allow-Origin'] = origin
     response.headers['X-API-Latency'] = '2ms'
     return response
 
 @app.route('/health')
 @limiter.exempt
-def health(): 
+def health():
     return jsonify({"status": "ok", "latency": "2ms", "timestamp": str(datetime.now(timezone.utc))}), 200
 
 @app.route('/v1/parse')
@@ -186,23 +227,31 @@ def health():
 def parse_ua():
     key = request.headers.get('X-API-Key', '').strip() or request.args.get('key', '').strip()
     ua_string = request.args.get('ua', '').strip()
-    if not ua_string: 
-        return jsonify({"error": "Missing?ua=Mozilla/5.0..."}), 400
-    if len(ua_string) > MAX_UA_LENGTH: 
+    
+    if not ua_string:
+        return jsonify({"error": "Missing ?ua=Mozilla/5.0..."}), 400
+    if len(ua_string) > MAX_UA_LENGTH:
         return jsonify({"error": f"UA string too long (max {MAX_UA_LENGTH} chars)"}), 400
-    if key and not validate_api_key_format(key): 
+    if key and not validate_api_key_format(key):
         return jsonify({"error": "Invalid API key format"}), 400
+    
+    # Parse FIRST, then deduct credit (major fix)
+    try:
+        u = parse(ua_string)
+    except Exception as e:
+        logger.error(f"Error parsing UA: {e}")
+        return jsonify({"error": "Invalid UA string"}), 400
     
     new_credits = deduct_credit(key)
     if new_credits is None:
         reset_time = "12:00hrs UTC"
-        return jsonify({"error": "No credits", "price": f"${USDT_PRICE_USD} = 1000 parses", "buy": "/create-order", "free_tier": f"1000/day with key=test, resets at {reset_time}", "docs": "/docs"}), 402
-        
-    try: 
-        u = parse(ua_string)
-    except Exception as e: 
-        print(f"Error parsing UA: {e}")
-        return jsonify({"error": "Invalid UA string"}), 400
+        return jsonify({
+            "error": "No credits",
+            "price": f"${USDT_PRICE_USD} = 1000 parses",
+            "buy": "/create-order",
+            "free_tier": f"1000/day with key=test, resets at {reset_time}",
+            "docs": "/docs"
+        }), 402
     
     is_ai_agent, bot_type, allows_training = detect_ai_agent(ua_string)
     platform = u.os.family.lower() if u.os.family else 'unknown'
@@ -213,82 +262,119 @@ def parse_ua():
     is_datacenter = device_type == 'server' or is_headless
     hosting_provider = None
     
-    return jsonify({"browser": u.browser.family, "browser_version": u.browser.version_string, "os": u.os.family, "os_version": u.os.version_string, "device": u.device.family, "device_type": device_type, "is_bot": u.is_bot, "is_ai_agent": is_ai_agent, "bot_type": bot_type, "allows_training": allows_training, "platform": platform, "is_headless": is_headless, "browser_engine": browser_engine, "is_datacenter": is_datacenter, "hosting_provider": hosting_provider, "primary_lang": primary_lang, "region": region, "credits_left": new_credits}), 200, {'Cache-Control': 'public, max-age=86400', 'CDN-Cache-Control': 'max-age=31536000'}
+    return jsonify({
+        "browser": u.browser.family,
+        "browser_version": u.browser.version_string,
+        "os": u.os.family,
+        "os_version": u.os.version_string,
+        "device": u.device.family,
+        "device_type": device_type,
+        "is_bot": u.is_bot,
+        "is_ai_agent": is_ai_agent,
+        "bot_type": bot_type,
+        "allows_training": allows_training,
+        "platform": platform,
+        "is_headless": is_headless,
+        "browser_engine": browser_engine,
+        "is_datacenter": is_datacenter,
+        "hosting_provider": hosting_provider,
+        "primary_lang": primary_lang,
+        "region": region,
+        "credits_left": new_credits
+    }), 200, {'Cache-Control': 'public, max-age=86400', 'CDN-Cache-Control': 'max-age=31536000'}
 
 @app.route('/create-order', methods=['POST', 'GET'])
 @limiter.limit("5/minute")
 def create_order():
-    if request.method == 'GET': 
+    if request.method == 'GET':
         return jsonify({"message": "POST JSON with {\"email\":\"you@example.com\"} to create order"})
+    
     data = request.get_json() or {}
     email = data.get('email', '').strip().lower() if data.get('email') else ''
-    if not validate_email(email): 
+    if not validate_email(email):
         return jsonify({"error": "Invalid email address"}), 400
     
     with get_db_cursor() as cur:
-        cur.execute("UPDATE orders SET status = 'expired' WHERE email = %s AND status = 'pending' AND created_at < NOW() - INTERVAL '20 minutes'", (email,))
-        
+        cur.execute("""
+            UPDATE orders 
+            SET status = 'expired' 
+            WHERE email = %s AND status = 'pending' 
+            AND created_at < NOW() - INTERVAL '20 minutes'
+        """, (email,))
+    
     with get_db_cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT order_id FROM orders WHERE email = %s AND status = 'pending' LIMIT 1", (email,))
         existing = cur.fetchone()
-        if existing: 
+        if existing:
             return jsonify({"error": "You already have a pending order. Check your email or contact support."}), 409
-        
+    
     order_id = f"order_{email.replace('@','_').replace('.','_')}_{uuid.uuid4().hex[:6]}"
     api_key = "sk_live_" + secrets.token_urlsafe(16)
     create_or_update_key(api_key, 0)
     
     with get_db_cursor() as cur:
-        cur.execute("INSERT INTO orders (order_id, api_key, email, amount, status, provider) VALUES (%s, %s, %s, %s, 'pending', 'nowpayments')", (order_id, api_key, email, USDT_PRICE_USD))
-        
-    if not NOWPAYMENTS_API_KEY: 
+        cur.execute("""
+            INSERT INTO orders (order_id, api_key, email, amount, status, provider) 
+            VALUES (%s, %s, %s, %s, 'pending', 'nowpayments')
+        """, (order_id, api_key, email, USDT_PRICE_USD))
+    
+    if not NOWPAYMENTS_API_KEY:
         return jsonify({"error": "Payment not configured"}), 500
     
-    # FIXED: Removed 'customer_email' from payload to resolve the NOWPayments frontend status 400 input error conflict
     np_payload = {
-        "price_amount": USDT_PRICE_USD, 
-        "price_currency": "usd", 
+        "price_amount": USDT_PRICE_USD,
+        "price_currency": "usd",
         "pay_currency": "usdttrc20",
-        "order_id": order_id, 
-        "order_description": "UA Parser API - 1000 credits", 
+        "order_id": order_id,
+        "order_description": "UA Parser API - 1000 credits",
         "is_fixed_rate": True,
         "is_fee_paid_by_user": False,
-        "ipn_callback_url": f"{WEBHOOK_URL}/webhook/nowpayments", 
-        "success_url": f"{BASE_URL}/thanks", 
+        "ipn_callback_url": f"{WEBHOOK_URL}/webhook/nowpayments",
+        "success_url": f"{BASE_URL}/thanks",
         "cancel_url": f"{BASE_URL}/"
     }
     headers = {"x-api-key": NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
     r = requests.post("https://api.nowpayments.io/v1/invoice", json=np_payload, headers=headers, timeout=10)
-    if r.status_code != 200: 
-        print(f"NowPayments error: {r.text}")
+    
+    if r.status_code != 200:
+        logger.error(f"NowPayments error: {r.text}")
         return jsonify({"error": "Payment provider error"}), 500
     
     invoice = r.json()
-    return jsonify({"checkout_url": invoice['invoice_url'], "order_id": order_id, "message": "Customer sees $5 only. No memo needed."}), 200
+    return jsonify({
+        "checkout_url": invoice.get('invoice_url'),
+        "order_id": order_id,
+        "message": "Customer sees $5 only. No memo needed."
+    }), 200
 
 @app.route('/webhook/nowpayments', methods=['POST'])
 @limiter.exempt
 def nowpayments_webhook():
-    forwarded_for = request.headers.get('X-Forwarded-For', '')
-    if not forwarded_for and request.remote_addr != '127.0.0.1': 
-        print("WARNING: Webhook from unknown IP")
+    # Improved IP validation
+    client_ip = request.remote_addr or ''
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    ips = [client_ip] + [ip.strip() for ip in forwarded.split(',') if ip.strip()]
+    if not any(ip.startswith(prefix) for ip in ips for prefix in NOWPAYMENTS_IP_PREFIXES):
+        logger.warning(f"Webhook from unknown IP: {client_ip}")
+    
     received_sig = request.headers.get('x-nowpayments-sig')
-    if not received_sig: 
-        print("ERROR: Missing x-nowpayments-sig header")
+    if not received_sig:
+        logger.error("Missing x-nowpayments-sig header")
         return 'Invalid signature', 403
     
     payload = request.get_data()
-    if not NOWPAYMENTS_IPN_SECRET: 
+    if not NOWPAYMENTS_IPN_SECRET:
         return 'IPN secret not set', 500
+    
     calc_sig = hmac.new(NOWPAYMENTS_IPN_SECRET.encode(), payload, hashlib.sha512).hexdigest()
-    if not hmac.compare_digest(received_sig, calc_sig): 
-        print("ERROR: Signature mismatch")
+    if not hmac.compare_digest(received_sig, calc_sig):
+        logger.error("Signature mismatch")
         return 'Invalid signature', 403
     
-    try: 
+    try:
         data = request.get_json()
-    except Exception as e: 
-        print(f"ERROR: Invalid JSON in webhook: {e}")
+    except Exception as e:
+        logger.error(f"Invalid JSON in webhook: {e}")
         return 'Invalid payload', 400
     
     if data.get('payment_status') == 'finished':
@@ -298,30 +384,34 @@ def nowpayments_webhook():
         
         with get_db_cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT order_id FROM orders WHERE idempotency_key = %s AND status = 'paid'", (txid,))
-            if cur.fetchone(): 
+            if cur.fetchone():
                 return 'ok', 200
-            
+        
         with get_db_cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
             order = cur.fetchone()
-            
+        
         if order and order['status'] != 'paid' and amount >= USDT_PRICE_USD:
             with get_db_cursor() as cur:
-                cur.execute("UPDATE orders SET status = 'paid', tx_hash = %s, idempotency_key = %s WHERE order_id = %s", (txid, txid, order_id))
+                cur.execute("""
+                    UPDATE orders 
+                    SET status = 'paid', tx_hash = %s, idempotency_key = %s 
+                    WHERE order_id = %s
+                """, (txid, txid, order_id))
             create_or_update_key(order['api_key'], 1000)
             send_api_key_email(order['email'], order['api_key'])
-            print(f"NOWPAYMENTS FULFILLED {order_id} - TX: {txid}")
-            
+            logger.info(f"NOWPAYMENTS FULFILLED {order_id} - TX: {txid}")
+    
     return 'ok', 200
 
 @app.route('/openapi.json')
 @limiter.exempt
-def openapi(): 
+def openapi():
     return send_from_directory('.', 'openapi.json')
 
 @app.route('/llms.txt')
 @limiter.exempt
-def llms_txt(): 
+def llms_txt():
     return send_from_directory('.', 'llms.txt')
 
 @app.route('/')
